@@ -1,0 +1,6 @@
+google-genai
+python-telegram-bot
+numpy
+web3
+eth-account
+python-dotenv
