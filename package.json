@@ -1,0 +1,15 @@
+{
+  "name": "gemini-telegram-atomic-bot",
+  "version": "1.0.0",
+  "description": "Atomic High-Low Bot with Telegram Interface",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "telegraf": "^4.16.3"
+  }
+}
