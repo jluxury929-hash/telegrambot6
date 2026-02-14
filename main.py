@@ -86,7 +86,7 @@ async def run_atomic_execution(context, chat_id, side):
     # BROADCAST
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
 
-    profit_usd = stake_usd * 0.92
+    profit_usd = stake_usd * 1.92
     
     report = (
         f"✅ **ATOMIC HIT!**\n"
