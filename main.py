@@ -11,7 +11,7 @@ from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# Set high precision for financial calculations
+# Set high precision for financial calculations to prevent "missing cents"
 getcontext().prec = 28
 
 # --- 1. SETUP & AUTH ---
@@ -63,7 +63,7 @@ async def run_atomic_execution(context, chat_id, side):
     # 🎯 JIT CALCULATION: Ensures exactly $19.00 CAD total
     current_price_cad = get_pol_price_cad()
     
-    # Use Decimal for high-precision math to prevent "missing pennies" on-chain
+    # Use Decimal math to calculate exact tokens: (Target CAD / Price)
     tokens_reimburse = Decimal(str(stake_cad)) / current_price_cad
     tokens_profit = Decimal('9.00') / current_price_cad
     
@@ -73,7 +73,7 @@ async def run_atomic_execution(context, chat_id, side):
     status_msg = await context.bot.send_message(chat_id, f"⚔️ **CAD Engine:** Priming {context.user_data.get('pair', 'BTC')} Shield...")
 
     try:
-        # 1. Parallel Execution Pipeline
+        # 1. Start Simulation and Prep
         sim_task = asyncio.create_task(asyncio.sleep(1.5))
         prep_task = asyncio.create_task(prepare_split_signed_txs(reimburse_wei, profit_wei))
         await sim_task
@@ -85,7 +85,7 @@ async def run_atomic_execution(context, chat_id, side):
 
         await context.bot.edit_message_text("⛓️ **Broadcasting to Polygon...**", chat_id=chat_id, message_id=status_msg.message_id)
         
-        # 3. Success Report with exact token counts
+        # 3. Success Report
         report = (
             f"✅ **ATOMIC HIT (CAD)**\n"
             f"🎯 **Direction:** {side}\n"
