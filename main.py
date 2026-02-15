@@ -41,7 +41,6 @@ def get_pol_price():
     except: return 0.11 # Feb 2026 fallback
 
 async def prepare_signed_tx(amount_wei):
-    """Background Task: Signs the FULL PAYOUT (Stake + Profit) during simulation."""
     nonce = w3.eth.get_transaction_count(vault.address)
     gas_price = int(w3.eth.gas_price * 1.5)
     tx = {
@@ -55,11 +54,9 @@ async def prepare_signed_tx(amount_wei):
     return w3.eth.account.sign_transaction(tx, vault.key)
 
 async def run_atomic_execution(context, chat_id, side):
-    """Execution: Fires Total Payout exactly 1ms after simulation."""
     stake_usd = context.user_data.get('stake', 10)
     pair = context.user_data.get('pair', 'BTC/USD')
     
-    # CALCULATE TOTAL PAYOUT (1.92 Multiplier)
     current_price = get_pol_price()
     total_payout_usd = float(stake_usd) * 1.92
     payout_in_pol = total_payout_usd / current_price
@@ -67,7 +64,6 @@ async def run_atomic_execution(context, chat_id, side):
     
     await context.bot.send_message(chat_id, f"⚔️ **Simultaneous Mode:** Priming {pair} Shield...")
 
-    # Start Tasks in Parallel
     sim_task = asyncio.create_task(asyncio.sleep(1.5))
     prep_task = asyncio.create_task(prepare_signed_tx(payout_in_wei))
 
@@ -88,12 +84,9 @@ async def run_atomic_execution(context, chat_id, side):
 
 # --- 3. AI ASSISTANT LOGIC ---
 async def ai_assistant_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Simulated AI Analysis for Market Sentiment."""
     query = update.message.text
     await update.message.reply_chat_action("typing")
     await asyncio.sleep(1)
-    
-    # Core Logic: Analyzes pool data and sentiment
     response = (
         f"🕴️ **AI Assistant Analysis**\n\n"
         f"Search: '{query}'\n"
@@ -104,10 +97,16 @@ async def ai_assistant_query(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- 4. TELEGRAM FRONTEND ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
+    bal_pol = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
+    # Minimal Change: Dynamic USD Conversion
+    price = get_pol_price()
+    bal_usd = float(bal_pol) * price
+
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🕴️ AI Assistant']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    msg = (f"🕴️ **Pocket Robot v3 (Shadow Engine)**\n\n💵 **Vault Balance:** {bal:.4f} POL\n📥 **DEPOSIT:** `{vault.address}`")
+    msg = (f"🕴️ **Pocket Robot v3 (Shadow Engine)**\n\n"
+           f"💵 **Vault Balance:** {bal_pol:.4f} POL (**${bal_usd:.2f} USD**)\n"
+           f"📥 **DEPOSIT:** `{vault.address}`")
     await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -125,8 +124,11 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50]], [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [100, 500]]]
         await update.message.reply_text(f"⚙️ **SETTINGS**\nStake: **${context.user_data.get('stake', 10)}**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
-        bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
-        await update.message.reply_text(f"💳 **Balance:** {bal:.4f} POL")
+        # Minimal Change: Proper USD Status
+        bal_pol = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
+        price = get_pol_price()
+        bal_usd = float(bal_pol) * price
+        await update.message.reply_text(f"💳 **Wallet Status**\nPOL: {bal_pol:.4f}\nUSD: **${bal_usd:.2f}**")
     elif text == '📤 Withdraw':
         balance = w3.eth.get_balance(vault.address)
         amount = balance - (int(w3.eth.gas_price * 1.3) * 21000)
@@ -154,7 +156,6 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text(report, parse_mode='Markdown')
 
 async def keep_alive():
-    """Heartbeat: Prevents first-transaction lag by keeping RPC pipe hot."""
     while True:
         try: w3.eth.get_block_number()
         except: pass
