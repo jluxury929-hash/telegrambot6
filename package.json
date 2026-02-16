@@ -1,15 +1,20 @@
 {
   "name": "gemini-telegram-atomic-bot",
   "version": "1.0.0",
-  "description": "Atomic High-Low Bot with Telegram Interface",
+  "description": "Atomic High-Low Bot with Gemini AI and Polymarket CLOB Integration",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "@polymarket/clob-client": "^1.0.0",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
-    "telegraf": "^4.16.3"
+    "ethers": "^6.13.2",
+    "telegraf": "^4.16.3",
+    "axios": "^1.7.7",
+    "ws": "^8.18.0"
   }
 }
