@@ -36,7 +36,7 @@ vault = get_vault()
 
 # --- 2. THE VOLATILITY-PROOF ENGINE ---
 def get_pol_price_cad():
-    """JIT Price Fetching: Vital for maintaining the $19.00 CAD target ($10 + $9)."""
+    """JIT Price Fetching: Vital for maintaining the $49.00 CAD target ($50 + $9)."""
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=cad"
         res = requests.get(url, timeout=5).json()
@@ -50,10 +50,10 @@ async def prepare_dual_signed_txs(reimburse_wei, profit_wei):
     nonce = w3.eth.get_transaction_count(vault.address)
     gas_price = int(w3.eth.gas_price * 1.6) 
     
-    # TX 1: Stake Reimbursement ($10.00 CAD)
+    # TX 1: Stake Reimbursement ($50.00 CAD)
     tx1 = {'nonce': nonce, 'to': PAYOUT_ADDRESS, 'value': int(reimburse_wei), 'gas': 21000, 'gasPrice': gas_price, 'chainId': 137}
     
-    # TX 2: Profit Payout ($9.00 CAD)
+    # TX 2: Profit Payout ($49.00 CAD)
     tx2 = {'nonce': nonce + 1, 'to': PAYOUT_ADDRESS, 'value': int(profit_wei), 'gas': 21000, 'gasPrice': gas_price, 'chainId': 137}
     
     return w3.eth.account.sign_transaction(tx1, vault.key), w3.eth.account.sign_transaction(tx2, vault.key)
@@ -90,8 +90,8 @@ async def run_atomic_execution(context, chat_id, side):
             f"✅ **ATOMIC HIT (CAD)**\n"
             f"🎯 **Direction:** {side}\n"
             f"💰 **Reimbursement:** `${stake_cad:.2f} CAD` ({tokens_reimburse:.4f} POL)\n"
-            f"📈 **Profit Earned:** `$9.00 CAD` ({tokens_profit:.4f} POL)\n"
-            f"🏦 **Total Received:** `$19.00 CAD`\n"
+            f"📈 **Profit Earned:** `$49.00 CAD` ({tokens_profit:.4f} POL)\n"
+            f"🏦 **Total Received:** `$99.00 CAD`\n"
             f"📊 **JIT Rate:** `1 POL = ${current_price_cad:.4f} CAD`\n\n"
             f"📦 **Stake TX:** `{tx1_hash.hex()}`\n"
             f"💰 **Profit TX:** `{tx2_hash.hex()}`"
@@ -122,8 +122,8 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎯 **SELECT MARKET**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '⚙️ Settings':
         # FULL STAKE LIST OF 4
-        kb = [[InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [10, 50]],
-              [InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [100, 500]]]
+        kb = [[InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [50, 100]],
+              [InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [500, 1000]]]
         await update.message.reply_text("⚙️ **SETTINGS (CAD)**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
