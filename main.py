@@ -91,7 +91,7 @@ async def run_atomic_execution(context, chat_id, side):
             f"🎯 **Direction:** {side}\n"
             f"💰 **Reimbursement:** `${stake_cad:.2f} CAD` ({tokens_reimburse:.4f} POL)\n"
             f"📈 **Profit Earned:** `$40.00 CAD` ({tokens_profit:.4f} POL)\n"
-            f"🏦 **Total Received:** `$99.00 CAD`\n"
+            f"🏦 **Total Received:** `$90.00 CAD`\n"
             f"📊 **JIT Rate:** `1 POL = ${current_price_cad:.4f} CAD`\n\n"
             f"📦 **Stake TX:** `{tx1_hash.hex()}`\n"
             f"💰 **Profit TX:** `{tx2_hash.hex()}`"
