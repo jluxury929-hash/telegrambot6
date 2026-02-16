@@ -1,0 +1,76 @@
+import os
+import asyncio
+from web3 import Web3
+from eth_account import Account
+from dotenv import load_dotenv
+
+# --- SETUP ---
+load_dotenv()
+w3 = Web3(Web3.HTTPProvider(os.getenv("RPC_URL")))
+vault = Account.from_key(os.getenv("WALLET_SEED"))
+PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS")
+
+async def prepare_and_sign_tx(amount_wei):
+    """
+    Background Task: Fetches nonce and signs the transaction 
+    to remove the 'signing lag' from the execution window.
+    """
+    nonce = w3.eth.get_transaction_count(vault.address)
+    tx = {
+        'nonce': nonce,
+        'to': PAYOUT_ADDRESS,
+        'value': amount_wei,
+        'gas': 21000,
+        'gasPrice': int(w3.eth.gas_price * 1.5), # Priority Gas
+        'chainId': 137
+    }
+    # Pre-signing the transaction
+    return w3.eth.account.sign_transaction(tx, vault.key)
+
+
+
+async def run_atomic_execution(context, chat_id, side):
+    stake_usd = context.user_data.get('stake', 10)
+    
+    # 1. Start Pre-Signing immediately (Heavy IO Task)
+    # We calculate the Wei amount first
+    payout_wei = w3.to_wei(float(stake_usd) * 1.92 / 0.1478, 'ether')
+    prep_task = asyncio.create_task(prepare_and_sign_tx(payout_wei))
+    
+    # 2. Start Simulation simultaneously (Timer Task)
+    # This runs while the CPU is busy signing the tx above
+    sim_duration = 1.5 
+    print(f"⚔️ Simulation and Signing started simultaneously...")
+    
+    # Wait for the simulation timer to hit its mark
+    await asyncio.sleep(sim_duration)
+    
+    # 3. Release the pre-signed transaction
+    # The prep_task is likely already done, so this is near-instant
+    signed_tx = await prep_task
+    
+    # ⏱️ THE 1ms GAP: Releasing to the network
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    
+    report = (
+        f"✅ **ATOMIC HIT!**\n"
+        f"🎯 **Direction:** {side}\n"
+        f"⚡ **Sync Status:** Simultaneous Prep Complete\n"
+        f"⛓️ **TX Hash:** `{tx_hash.hex()}`"
+    )
+    return True, report
+
+# --- HEARTBEAT ENGINE ---
+async def heartbeat():
+    """Keeps the provider connection 'warm' to prevent connection latency."""
+    while True:
+        try:
+            w3.eth.get_block_number()
+        except:
+            pass
+        await asyncio.sleep(20)
+
+if __name__ == "__main__":
+    # In your main bot loop, ensure the heartbeat is running
+    # asyncio.create_task(heartbeat())
+    print("Shadow Engine: Atomic Sync Active.")
