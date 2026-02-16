@@ -5,13 +5,17 @@ from py_clob_client.clob_types import OrderArgs
 from py_clob_client.order_builder.constants import BUY
 from web3 import Web3
 
-# --- 1. INITIALIZATION ---
+# --- 1. THE ADDRESSES (2026 Standards) ---
+# Most exchanges like Coinbase now send Native USDC
+USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+USDC_BRIDGED = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
 async def initialize_earning_client():
     host = "https://clob.polymarket.com"
     pk = os.getenv("PRIVATE_KEY")
-    funder = os.getenv("FUNDER_ADDRESS") 
+    funder = os.getenv("FUNDER_ADDRESS")
     
-    # signature_type=1 for Email/Magic Link users.
+    # signature_type=1 is for Email/Magic Link. Use 0 if using a MetaMask PK.
     client = ClobClient(host, key=pk, chain_id=137, signature_type=1, funder=funder)
     
     print("🔑 Authenticating with Polymarket...")
@@ -19,31 +23,44 @@ async def initialize_earning_client():
     client.set_api_creds(creds)
     return client
 
-# --- 2. ATOMIC TARGET ENGINE ---
+# --- 2. THE UNIVERSAL BALANCE CHECK ---
+def check_usdc_liquidity(funder):
+    w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+    abi = '[{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"type":"function"}]'
+    
+    native = w3.eth.contract(address=Web3.to_checksum_address(USDC_NATIVE), abi=abi)
+    bridged = w3.eth.contract(address=Web3.to_checksum_address(USDC_BRIDGED), abi=abi)
+    
+    bal_native = native.functions.balanceOf(funder).call() / 1e6
+    bal_bridged = bridged.functions.balanceOf(funder).call() / 1e6
+    
+    print(f"💰 USDC Native: ${bal_native:.2f} | USDC.e: ${bal_bridged:.2f}")
+    return bal_native + bal_bridged
+
+# --- 3. ATOMIC TARGET ENGINE ---
 async def execute_atomic_hit(client, token_id, stake_cad):
-    """
-    Targets a $19 payout using exactly $10 CAD.
-    """
-    # Step 1: Currency Conversion (CAD to USD)
+    funder = os.getenv("FUNDER_ADDRESS")
+    
+    # Check total USDC power
+    total_usdc = check_usdc_liquidity(funder)
+    
     usd_rate = 0.735 
-    total_usd = float(stake_cad) * usd_rate # $10 CAD -> ~$7.35 USD
+    required_usd = float(stake_cad) * usd_rate # $10 CAD -> ~$7.35 USD
     
-    # Step 2: Calculate Atomic Payout
-    target_shares = 19  # Each share = $1 payout. 19 shares = $19 payout.
-    limit_price = round(total_usd / target_shares, 2) # ~$0.38
-    
-    print(f"🎯 Target: 19 Shares at ${limit_price} for a $19.00 Payout")
+    if total_usdc < required_usd:
+        return f"❌ Insufficient Funds: You have ${total_usdc:.2f} USD, but need ${required_usd:.2f} ($10 CAD)."
+
+    # Step 2: Target $19 payout (19 shares)
+    target_shares = 19  
+    limit_price = round(required_usd / target_shares, 2) # ~$0.38
 
     try:
-        # Step 3: Gas Guard (Fixes Error -32000)
-        # We cap the gas bid so it doesn't exceed your POL balance
+        # Step 3: Gas Guard (Manual cap to avoid -32000)
         w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
-        current_gas = w3.eth.gas_price
-        safe_gas_price = int(current_gas * 1.1) # 10% buffer is safer than 100%
+        safe_gas_price = int(w3.eth.gas_price * 1.1)
 
         # Step 4: Fire the Limit Order
-        # This order waits on the book until the market hits your $0.38 price.
-        print(f"🚀 Firing Limit Order: Buying {target_shares} shares...")
+        print(f"🚀 Firing Limit Order: 19 shares @ ${limit_price}...")
         
         resp = client.create_and_post_order(OrderArgs(
             price=limit_price,
@@ -55,18 +72,16 @@ async def execute_atomic_hit(client, token_id, stake_cad):
         if resp.get("success"):
             return f"✅ SUCCESS: Limit Order placed. ID: {resp.get('orderID')}\n💰 Cost: ~{stake_cad} CAD | 🏆 Payout: $19.00 USD"
         else:
+            # Handle the 'Activation' issue
+            if "allowance" in str(resp).lower():
+                return "❌ ALLOWANCE ERROR: Go to Polymarket.com and click 'Enable USDC' to activate your funds."
             return f"❌ Rejected: {resp.get('errorMsg')}"
 
     except Exception as e:
-        if "insufficient funds" in str(e).lower():
-            return "❌ GAS ERROR: Add 1-2 POL to your wallet to cover the fee buffer."
         return f"❌ Execution Error: {str(e)}"
 
-# --- 3. RUNNER ---
 if __name__ == "__main__":
-    async def run_bot():
+    async def run():
         c = await initialize_earning_client()
-        # Replace with a real token_id from your discovery script
-        print(await execute_atomic_hit(c, "0x1b6f76e5b8587ee8...", 10.0))
-        
-    asyncio.run(run_bot())
+        print(await execute_atomic_hit(c, "YOUR_TOKEN_ID", 10.0))
+    asyncio.run(run())
