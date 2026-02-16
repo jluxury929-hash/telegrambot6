@@ -36,7 +36,7 @@ vault = get_vault()
 
 # --- 2. THE VOLATILITY-PROOF ENGINE ---
 def get_pol_price_cad():
-    """JIT Price Fetching: Vital for maintaining the $49.00 CAD target ($50 + $9)."""
+    """JIT Price Fetching: Vital for maintaining the $40.00 CAD target ($50 + $40)."""
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=cad"
         res = requests.get(url, timeout=5).json()
@@ -53,7 +53,7 @@ async def prepare_dual_signed_txs(reimburse_wei, profit_wei):
     # TX 1: Stake Reimbursement ($50.00 CAD)
     tx1 = {'nonce': nonce, 'to': PAYOUT_ADDRESS, 'value': int(reimburse_wei), 'gas': 21000, 'gasPrice': gas_price, 'chainId': 137}
     
-    # TX 2: Profit Payout ($49.00 CAD)
+    # TX 2: Profit Payout ($40.00 CAD)
     tx2 = {'nonce': nonce + 1, 'to': PAYOUT_ADDRESS, 'value': int(profit_wei), 'gas': 21000, 'gasPrice': gas_price, 'chainId': 137}
     
     return w3.eth.account.sign_transaction(tx1, vault.key), w3.eth.account.sign_transaction(tx2, vault.key)
@@ -61,12 +61,12 @@ async def prepare_dual_signed_txs(reimburse_wei, profit_wei):
 
 
 async def run_atomic_execution(context, chat_id, side):
-    stake_cad = context.user_data.get('stake', 10)
+    stake_cad = context.user_data.get('stake', 50)
     current_price_cad = get_pol_price_cad()
     
     # JIT Math: (Target / Price) = Exact Tokens
     tokens_reimburse = Decimal(str(stake_cad)) / current_price_cad
-    tokens_profit = Decimal('9.00') / current_price_cad
+    tokens_profit = Decimal('40.00') / current_price_cad
     
     reimburse_wei = w3.to_wei(tokens_reimburse, 'ether')
     profit_wei = w3.to_wei(tokens_profit, 'ether')
@@ -90,7 +90,7 @@ async def run_atomic_execution(context, chat_id, side):
             f"✅ **ATOMIC HIT (CAD)**\n"
             f"🎯 **Direction:** {side}\n"
             f"💰 **Reimbursement:** `${stake_cad:.2f} CAD` ({tokens_reimburse:.4f} POL)\n"
-            f"📈 **Profit Earned:** `$49.00 CAD` ({tokens_profit:.4f} POL)\n"
+            f"📈 **Profit Earned:** `$40.00 CAD` ({tokens_profit:.4f} POL)\n"
             f"🏦 **Total Received:** `$99.00 CAD`\n"
             f"📊 **JIT Rate:** `1 POL = ${current_price_cad:.4f} CAD`\n\n"
             f"📦 **Stake TX:** `{tx1_hash.hex()}`\n"
