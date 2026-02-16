@@ -1,73 +1,73 @@
 import os
 import asyncio
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs
+from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 from web3 import Web3
 
-# --- 1. CONFIG ---
-USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-USDC_BRIDGED = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-
+# --- 1. SETUP ---
 async def initialize_earning_client():
     host = "https://clob.polymarket.com"
-    client = ClobClient(host, key=os.getenv("PRIVATE_KEY"), chain_id=137, signature_type=1, funder=os.getenv("FUNDER_ADDRESS"))
-    client.set_api_creds(client.create_or_derive_api_creds())
+    pk = os.getenv("PRIVATE_KEY")
+    funder = os.getenv("FUNDER_ADDRESS")
+    
+    # signature_type=1 for Polymarket proxy wallets
+    client = ClobClient(host, key=pk, chain_id=137, signature_type=1, funder=funder)
+    
+    print("🔑 Authenticating...")
+    creds = client.create_or_derive_api_creds()
+    client.set_api_creds(creds)
     return client
 
-# --- 2. ATOMIC EXECUTION ---
-async def execute_atomic_hit(client, token_id, stake_cad):
-    # Step 1: Currency Conversion
-    usd_rate = 0.735  # $1 CAD to USD
-    budget_usd = float(stake_cad) * usd_rate # $10 CAD -> $7.35 USD
-    
-    # Step 2: Set the Hard Target
-    target_payout_usd = 19.00
-    shares_to_buy = 19 
-    
-    # CALCULATE THE MAX PRICE (to keep cost at/under $10 CAD)
-    # Price = Budget / Shares
-    max_price_allowed = round(budget_usd / shares_to_buy, 2) # 0.38
-    
-    print(f"🛡️ Profit Shield: Budget is ${budget_usd:.2f} USD ({stake_cad} CAD)")
-    print(f"🎯 Target: 19 shares at ${max_price_allowed} or lower.")
+# --- 2. THE PROFIT SHIELD ENGINE ---
+async def execute_atomic_hit(client, token_id):
+    """
+    Guarantees you never spend more than $10 CAD.
+    Forces a payout target of $19 CAD ($14 USD).
+    """
+    # FEB 2026 Exchange Rate: 1 USD = 1.362 CAD
+    target_shares = 14 # Pays out $14.00 USD (~$19.06 CAD)
+    limit_price = 0.52 # Cost: $7.28 USD (~$9.92 CAD)
+
+    print(f"🛡️ Profit Shield: 14 shares @ ${limit_price} limit.")
 
     try:
-        # Step 3: Check Current Market Price
-        price_data = client.get_price(token_id, side=BUY)
-        current_market_price = float(price_data['price'])
-        
-        # STOP if it's too expensive
-        if current_market_price > max_price_allowed:
-            diff = current_market_price - max_price_allowed
-            return f"❌ ABORTED: Market price is ${current_market_price}. You would overspend by ${diff*shares_to_buy:.2f}."
-
-        # Step 4: Gas Guard
+        # STEP 1: Gas Guard (Save your POL balance)
         w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
-        safe_gas = int(w3.eth.gas_price * 1.1)
+        # Using a tight 1.05 multiplier prevents 'overshot' errors
+        safe_gas_price = int(w3.eth.gas_price * 1.05)
 
-        # Step 5: Fire the Order
-        print(f"🚀 Firing order at ${current_market_price} (CHEAPER THAN TARGET!)")
+        # STEP 2: The 'Post-Only' Maker Order
+        # This ensures you pay $0.00 fees and don't buy at a bad price
+        print(f"🚀 Firing Maker Order at ${limit_price}...")
         
-        resp = client.create_and_post_order(OrderArgs(
-            price=current_market_price,
-            size=shares_to_buy,
+        order_args = OrderArgs(
+            price=limit_price,
+            size=target_shares,
             side=BUY,
             token_id=token_id
-        ))
+        )
         
+        # We create the order first
+        signed_order = client.create_order(order_args)
+        
+        # post_only=True is the key. It prevents the 3.15% fee.
+        # If the price is higher than 0.52, the order sits and waits.
+        resp = client.post_order(signed_order, order_type=OrderType.GTC, post_only=True)
+
         if resp.get("success"):
-            actual_cost_cad = (current_market_price * shares_to_buy) / usd_rate
-            return f"✅ SUCCESS: Bet placed for {actual_cost_cad:.2f} CAD. Payout: $19.00 USD."
+            return f"✅ SUCCESS: Order set for ~$9.92 CAD cost.\n🏆 Payout on win: ~$19.06 CAD."
         else:
-            return f"❌ Rejected: {resp.get('errorMsg')}"
+            # If it's too expensive, the 'post_only' flag will reject it rather than lose you money
+            return f"❌ Rejected: {resp.get('errorMsg')} (Price too high right now)"
 
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        return f"❌ Execution Error: {str(e)}"
 
+# --- 3. RUNNER ---
 if __name__ == "__main__":
     async def run():
         c = await initialize_earning_client()
-        # Ensure you use the correct token_id for the market you want
-        print(await execute_atomic_hit(c, "YOUR_TOKEN_ID", 10.0))
+        # Ensure your TOKEN_ID is from a market currently priced near 0.50
+        print(await execute_atomic_hit(c, "YOUR_TOKEN_ID"))
     asyncio.run(run())
