@@ -25,15 +25,11 @@ PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
-    if not seed:
-        print("❌ WALLET_SEED missing!")
-        return None
+    if not seed: raise ValueError("❌ WALLET_SEED missing!")
     try:
         if len(seed) == 64 or seed.startswith("0x"): return Account.from_key(seed)
         return Account.from_mnemonic(seed, account_path="m/44'/60'/0'/0/0")
-    except Exception as e:
-        print(f"Error loading wallet: {e}")
-        return None
+    except: return None
 
 vault = get_vault()
 usdc_contract = w3.eth.contract(address=w3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
@@ -47,7 +43,7 @@ async def market_simulation_1ms(asset):
 
 async def sign_transaction_async(stake_usdc):
     """CPU Task: Pre-signs tx to eliminate broadcast lag."""
-    # Use to_thread to keep the event loop from freezing during Web3 calls
+    # Use to_thread to prevent blocking the main Telegram loop
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.5))
     
@@ -112,19 +108,19 @@ async def autopilot_engine(chat_id, context):
 
 # --- 4. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not vault:
-        return await update.message.reply_text("❌ Wallet Configuration Failed. Check WALLET_SEED.")
+    # Wrap Web3 call in thread to prevent /start command from hanging
+    try:
+        raw_bal = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        pol_bal = w3.from_wei(raw_bal, 'ether')
+    except:
+        pol_bal = 0.0
 
-    # Fetching balance in thread to prevent start message lag
-    raw_bal = await asyncio.to_thread(w3.eth.get_balance, vault.address)
-    pol_bal = w3.from_wei(raw_bal, 'ether')
-    
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
     welcome = (
-        f"🕴️ **Pocket Robot v3 (Elite Edition)**\n"
+        f"🕴️ **APEX Manual Terminal v6000**\n"
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n\n"
-        f"📥 **Deposit Address:**\n`{vault.address}`\n\n"
+        f"📥 **Vault Address:**\n`{vault.address}`\n\n"
         f"Status: **Simultaneous Sync Enabled**"
     )
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
@@ -145,8 +141,8 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '💰 Wallet':
-        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
-        pol_bal = w3.from_wei(raw_pol, 'ether')
+        raw_bal = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        pol_bal = w3.from_wei(raw_bal, 'ether')
         usdc_bal = await asyncio.to_thread(lambda: usdc_contract.functions.balanceOf(vault.address).call() / 10**6)
         
         wallet_msg = (
@@ -154,22 +150,9 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━\n"
             f"⛽ POL: `{pol_bal:.4f}`\n"
             f"💵 USDC: `{usdc_bal:.2f}`\n\n"
-            f"📥 **Deposit Address:**\n`{vault.address}`"
+            f"📥 **Vault Address:**\n`{vault.address}`"
         )
         await update.message.reply_text(wallet_msg, parse_mode='Markdown')
-
-    elif text == '📤 Withdraw':
-        bal = await asyncio.to_thread(usdc_contract.functions.balanceOf, vault.address).call()
-        if bal > 0:
-            nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
-            tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, bal).build_transaction({
-                'chainId': 137, 'gas': 65000, 'gasPrice': w3.eth.gas_price, 'nonce': nonce
-            })
-            signed = w3.eth.account.sign_transaction(tx, vault.key)
-            await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
-            await update.message.reply_text(f"📤 Successfully moved `{bal/10**6:.2f}` USDC.")
-        else:
-            await update.message.reply_text("❌ No USDC balance.")
 
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
