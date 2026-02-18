@@ -2,7 +2,6 @@ import os
 import asyncio
 import json
 import random
-import requests
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 from eth_account import Account
@@ -16,7 +15,6 @@ getcontext().prec = 28
 load_dotenv()
 
 W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com")
-ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY") # Use your V2 Key here
 w3 = Web3(Web3.HTTPProvider(W3_RPC))
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
@@ -42,9 +40,8 @@ usdc_contract = w3.eth.contract(address=USDC_ADDRESS, abi=ERC20_ABI)
 auto_mode_enabled = False
 
 # --- 2. UTILITY: BLOCKCHAIN STATE ---
-
 async def fetch_balances(address):
-    """Reliably fetches POL and USDC from RPC."""
+    """Reliably fetches POL and USDC from Polygon."""
     try:
         addr = w3.to_checksum_address(address)
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, addr)
@@ -56,32 +53,6 @@ async def fetch_balances(address):
     except Exception as e:
         print(f"Balance Sync Error: {e}")
         return Decimal('0'), Decimal('0')
-
-async def verify_balance_scan(address):
-    """Uses Etherscan V2 Unified API to verify balance on Polygon (ChainID 137)."""
-    if not ETHERSCAN_API_KEY:
-        return None
-    
-    url = "https://api.etherscan.io/v2/api"
-    params = {
-        "chainid": 137,
-        "module": "account",
-        "action": "tokenbalance",
-        "contractaddress": USDC_ADDRESS,
-        "address": address,
-        "tag": "latest",
-        "apikey": ETHERSCAN_API_KEY
-    }
-    
-    try:
-        # Using requests inside to_thread to prevent blocking
-        response = await asyncio.to_thread(requests.get, url, params=params, timeout=5)
-        data = response.json()
-        if data.get("status") == "1":
-            return Decimal(data["result"]) / Decimal(10**6)
-    except Exception as e:
-        print(f"Scan API Sync Error: {e}")
-    return None
 
 # --- 3. EXECUTION ENGINE ---
 async def market_simulation_1ms(asset):
@@ -106,19 +77,21 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
     profit_usdc = stake_usdc * yield_multiplier
 
-    # --- NEW: SCAN PRE-VERIFICATION ---
-    await context.bot.send_message(chat_id, "🛡️ **V2 Shield: Verifying balance via Scan API...**")
-    scan_bal = await verify_balance_scan(vault.address)
-    
-    if scan_bal is not None and scan_bal < stake_usdc:
-        await context.bot.send_message(chat_id, f"❌ **Incomplete Balance:** Scan API reports only ${scan_bal:.2f} USDC. Aborting.")
+    # --- ENHANCED BALANCE CHECK ---
+    pol_bal, usdc_bal = await fetch_balances(vault.address)
+    if usdc_bal < stake_usdc:
+        await context.bot.send_message(chat_id, f"❌ **Insufficient USDC**\nAvailable: `${usdc_bal:.2f}`\nRequired: `${stake_usdc:.2f}`")
         return False
-    # --- END VERIFICATION ---
+    if pol_bal < Decimal('0.005'): # Safety threshold for gas
+        await context.bot.send_message(chat_id, f"⛽ **Gas Error:** POL balance too low (`{pol_bal:.4f}`). Deposit POL to continue.")
+        return False
 
     await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\nMarket: `{asset}` | Stake: `${stake_usdc:.2f}`")
 
+    # Start Simulation and Signing in parallel for speed
     sim_task = asyncio.create_task(market_simulation_1ms(asset))
     sign_task = asyncio.create_task(sign_transaction_async(stake_usdc))
+    
     simulation_passed, signed_tx = await asyncio.gather(sim_task, sign_task)
 
     if not simulation_passed:
@@ -160,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
     welcome = (
-        f"🕴️ **APEX Manual Terminal v6.7**\n"
+        f"🕴️ **APEX Manual Terminal v6.5**\n"
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL:** `{pol:.4f}` | 💵 **USDC:** `${usdc:.2f}`\n\n"
         f"📥 **Vault Address:**\n`{vault.address}`"
@@ -184,16 +157,12 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address)
-        scan_bal = await verify_balance_scan(vault.address)
         refresh_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Balances", callback_data="REFRESH_BAL")]])
-        
-        scan_info = f"\n🔍 **V2 Verif:** `${scan_bal:.2f}`" if scan_bal is not None else ""
-        
         wallet_msg = (
             f"💳 **Vault Asset Status**\n"
             f"━━━━━━━━━━━━━━\n"
             f"⛽ **POL:** `{pol:.6f}`\n"
-            f"💵 **USDC (RPC):** `${usdc:.2f}`{scan_info}\n\n"
+            f"💵 **USDC:** `${usdc:.2f}`\n\n"
             f"📥 **Address:**\n`{vault.address}`"
         )
         await update.message.reply_text(wallet_msg, reply_markup=refresh_kb, parse_mode='Markdown')
@@ -210,16 +179,13 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if query.data == "REFRESH_BAL":
         pol, usdc = await fetch_balances(vault.address)
-        scan_bal = await verify_balance_scan(vault.address)
-        scan_info = f"\n🔍 **V2 Verif:** `${scan_bal:.2f}`" if scan_bal is not None else ""
-        
         new_text = (
             f"💳 **Vault Asset Status**\n"
             f"━━━━━━━━━━━━━━\n"
             f"⛽ **POL:** `{pol:.6f}`\n"
-            f"💵 **USDC:** `${usdc:.2f}`{scan_info}\n\n"
+            f"💵 **USDC:** `${usdc:.2f}`\n\n"
             f"📥 **Address:**\n`{vault.address}`\n\n"
-            f"✅ *Updated via Unified V2*"
+            f"✅ *Updated*"
         )
         try: await query.edit_message_text(new_text, reply_markup=query.message.reply_markup, parse_mode='Markdown')
         except: pass
