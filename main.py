@@ -59,6 +59,8 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
     profit_usdc = stake_usdc * yield_multiplier
 
+    await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\nMarket: `{asset}` | Stake: `${stake_usdc:.2f}`")
+
     # --- SIMULTANEOUS SYNC START ---
     sim_task = asyncio.create_task(market_simulation_1ms(asset))
     sign_task = asyncio.create_task(sign_transaction_async(stake_usdc))
@@ -135,6 +137,17 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
         usdc_bal = Decimal(usdc_contract.functions.balanceOf(vault.address).call()) / 10**6
         await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol_bal:.4f}`\n💵 USDC: `{usdc_bal:.2f}`", parse_mode='Markdown')
+
+    elif text == '📤 Withdraw':
+        bal = usdc_contract.functions.balanceOf(vault.address).call()
+        if bal > 0:
+            tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, bal).build_transaction({
+                'chainId': 137, 'gas': 65000, 'gasPrice': w3.eth.gas_price, 'nonce': w3.eth.get_transaction_count(vault.address)
+            })
+            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+            await update.message.reply_text(f"📤 Successfully moved `{bal/10**6:.2f}` USDC.")
+        else:
+            await update.message.reply_text("❌ No USDC balance.")
 
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
