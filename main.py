@@ -75,7 +75,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     try:
         tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_tx.raw_transaction)
         report = (
-            f"✅ **ATOMIC HIT CONFIRMED**\n"
+            f"✅ **HIT CONFIRMED**\n"
             f"━━━━━━━━━━━━━━\n"
             f"💎 **Market:** {asset}\n"
             f"🎯 **Direction:** {side}\n"
@@ -110,10 +110,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
     welcome = (
-        f"🕴️ **APEX Manual Terminal v6000**\n"
+        f"🕴️ **Pocket Robot v3 (Elite Edition)**\n"
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n\n"
-        f"📥 **Vault Address:**\n`{vault.address}`\n\n"
+        f"📥 **Deposit Address:**\n`{vault.address}`\n\n"
         f"Status: **Simultaneous Sync Enabled**"
     )
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
@@ -131,12 +131,19 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '💰 Wallet':
         pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
         usdc_bal = Decimal(usdc_contract.functions.balanceOf(vault.address).call()) / 10**6
-        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol_bal:.4f}`\n💵 USDC: `{usdc_bal:.2f}`", parse_mode='Markdown')
+        wallet_msg = (
+            f"💳 **Vault Status**\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⛽ POL: `{pol_bal:.4f}`\n"
+            f"💵 USDC: `{usdc_bal:.2f}`\n\n"
+            f"📥 **Deposit Address:**\n`{vault.address}`"
+        )
+        await update.message.reply_text(wallet_msg, parse_mode='Markdown')
 
     elif text == '📤 Withdraw':
         bal = usdc_contract.functions.balanceOf(vault.address).call()
