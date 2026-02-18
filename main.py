@@ -43,7 +43,6 @@ async def market_simulation_1ms(asset):
 
 async def sign_transaction_async(stake_usdc):
     """CPU Task: Pre-signs tx to eliminate broadcast lag."""
-    # Use to_thread to prevent blocking the main Telegram loop
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.5))
     
@@ -62,12 +61,10 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
 
     await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\nMarket: `{asset}` | Stake: `${stake_usdc:.2f}`")
 
-    # --- SIMULTANEOUS SYNC START ---
     sim_task = asyncio.create_task(market_simulation_1ms(asset))
     sign_task = asyncio.create_task(sign_transaction_async(stake_usdc))
 
     simulation_passed, signed_tx = await asyncio.gather(sim_task, sign_task)
-    # --- SIMULTANEOUS SYNC END ---
 
     if not simulation_passed:
         await context.bot.send_message(chat_id, "🛡️ **Atomic Shield:** Simulation failed (Revert Detected). Aborting.")
@@ -104,11 +101,10 @@ async def autopilot_engine(chat_id, context):
         
         await context.bot.send_message(chat_id, f"🎯 **Entry Detected!** Initializing 1ms Sync...")
         await run_atomic_execution(context, chat_id, side, asset_override=target)
-        await asyncio.sleep(20) # Cooldown
+        await asyncio.sleep(20)
 
 # --- 4. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Wrap Web3 call in thread to prevent /start command from hanging
     try:
         raw_bal = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         pol_bal = w3.from_wei(raw_bal, 'ether')
@@ -117,10 +113,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
     welcome = (
-        f"🕴️ **APEX Manual Terminal v6000**\n"
+        f"🕴️ **Pocket Robot v3 (Elite Edition)**\n"
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n\n"
-        f"📥 **Vault Address:**\n`{vault.address}`\n\n"
+        f"📥 **Deposit Address:**\n`{vault.address}`\n\n"
         f"Status: **Simultaneous Sync Enabled**"
     )
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
@@ -141,16 +137,18 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '💰 Wallet':
-        raw_bal = await asyncio.to_thread(w3.eth.get_balance, vault.address)
-        pol_bal = w3.from_wei(raw_bal, 'ether')
-        usdc_bal = await asyncio.to_thread(lambda: usdc_contract.functions.balanceOf(vault.address).call() / 10**6)
+        # FIXED WALLET LOGIC
+        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        pol_bal = w3.from_wei(raw_pol, 'ether')
+        usdc_raw = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
+        usdc_bal = Decimal(usdc_raw) / 10**6
         
         wallet_msg = (
             f"💳 **Vault Status**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⛽ POL: `{pol_bal:.4f}`\n"
+            f"⛽ POL Fuel: `{pol_bal:.4f}`\n"
             f"💵 USDC: `{usdc_bal:.2f}`\n\n"
-            f"📥 **Vault Address:**\n`{vault.address}`"
+            f"📥 **Deposit Address:**\n`{vault.address}`"
         )
         await update.message.reply_text(wallet_msg, parse_mode='Markdown')
 
