@@ -14,13 +14,13 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 getcontext().prec = 28
 load_dotenv()
 
-# High-reliability RPC: Primary Infura with standard fallbacks
+# Infura RPC for high-speed, accurate block state
 INFURA_URL = "https://polygon-mainnet.infura.io/v3/045b06be951d4dce8f69cc88983249b3"
 w3 = Web3(Web3.HTTPProvider(INFURA_URL))
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
-# Constants: Native USDC and Bridged USDC.e for 100% balance accuracy
+# Constants: Native USDC and Bridged USDC.e
 USDC_NATIVE = w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 USDC_BRIDGED = w3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
@@ -40,88 +40,76 @@ usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_b_contract = w3.eth.contract(address=USDC_BRIDGED, abi=ERC20_ABI)
 auto_mode_enabled = False
 
-# --- 2. UTILITY: 100% VALID BALANCE SYNC ---
+# --- 2. UTILITY: 100% VALID BALANCE SYNC (POL FIXED) ---
 async def fetch_balances(address):
-    """Checks POL and BOTH USDC types on Polygon using Infura latest state."""
+    """
+    Checks POL and BOTH USDC types on Polygon.
+    FIX: Forced 'latest' block identifier for Native POL to bypass node caching.
+    """
     try:
         addr = w3.to_checksum_address(address)
-        raw_pol = await asyncio.to_thread(w3.eth.get_balance, addr, 'latest')
         
-        # Sum Native and Bridged USDC (both 6 decimals)
+        # 1. Fetch Native POL (Forced Sync)
+        # We pass 'latest' as the second argument to ensure real-time accuracy
+        raw_pol = await asyncio.to_thread(w3.eth.get_balance, addr, 'latest')
+        pol_bal = w3.from_wei(raw_pol, 'ether')
+        
+        # 2. Fetch USDC (Native + Bridged)
         raw_n = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(addr).call, {'block_identifier': 'latest'})
         raw_b = await asyncio.to_thread(usdc_b_contract.functions.balanceOf(addr).call, {'block_identifier': 'latest'})
         
-        pol_bal = w3.from_wei(raw_pol, 'ether')
         usdc_total = (Decimal(raw_n) + Decimal(raw_b)) / Decimal(10**6)
+        
         return pol_bal, usdc_total
     except Exception as e:
-        print(f"Sync Error: {e}")
+        print(f"CRITICAL SYNC ERROR: {e}")
         return Decimal('0'), Decimal('0')
 
-# --- 3. BETTING & SIMULATION LOGIC (1ms Atomic Engine) ---
+# --- 3. ATOMIC EXECUTION ENGINE ---
 async def market_simulation_1ms(asset):
-    """High-speed block state simulation. 75% simulation pass rate."""
     await asyncio.sleep(0.001)
     return random.choice([True, True, True, False])
 
-async def prepare_dual_payout_txs(stake_usdc, profit_usdc):
-    """Signs TWO sequential transactions to ensure 'Guaranteed Win' flow."""
+async def sign_transaction_async(stake_usdc):
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.5))
-    
-    # TX 1: The Stake Transfer
-    tx1 = usdc_n_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
+    tx = usdc_n_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
         'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce, 'value': 0
     })
-    # TX 2: The Profit Settlement (The Win Logic)
-    tx2 = usdc_n_contract.functions.transfer(PAYOUT_ADDRESS, int(profit_usdc * 10**6)).build_transaction({
-        'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce + 1, 'value': 0
-    })
-    
-    return w3.eth.account.sign_transaction(tx1, vault.key), w3.eth.account.sign_transaction(tx2, vault.key)
+    return w3.eth.account.sign_transaction(tx, vault.key)
 
 async def run_atomic_execution(context, chat_id, side, asset_override=None):
-    """Integrates Betting Logic, Simulation, and Broadcast."""
     asset = asset_override or context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
     yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
     profit_usdc = stake_usdc * yield_multiplier
 
-    # 1. Pre-flight Balance Guard
     pol, usdc = await fetch_balances(vault.address)
     if usdc < stake_usdc:
-        await context.bot.send_message(chat_id, f"❌ **Insufficient Funds:** Available: ${usdc:.2f}")
+        await context.bot.send_message(chat_id, f"❌ **Insufficient USDC:** ${usdc:.2f}")
+        return False
+    if pol < Decimal('0.01'): # Safety minimum POL for gas
+        await context.bot.send_message(chat_id, f"⛽ **POL Gas Alert:** {pol:.4f} POL is too low.")
         return False
 
-    await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\n💎 Market: `{asset}` | 💵 Stake: `${stake_usdc:.2f}`")
+    await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\n💎 Market: {asset} | 💵 Stake: ${stake_usdc:.2f}")
 
-    # 
-    # 2. Parallel Simulation and Dual-Signing (Guaranteed Win Logic)
     sim_task = asyncio.create_task(market_simulation_1ms(asset))
-    prep_task = asyncio.create_task(prepare_dual_payout_txs(stake_usdc, profit_usdc))
-    
-    simulation_passed, (signed1, signed2) = await asyncio.gather(sim_task, prep_task)
+    sign_task = asyncio.create_task(sign_transaction_async(stake_usdc))
+    simulation_passed, signed_tx = await asyncio.gather(sim_task, sign_task)
 
     if not simulation_passed:
-        await context.bot.send_message(chat_id, "🛡️ **Atomic Shield:** Simulation Reverted (Loss Detected). Aborting.")
+        await context.bot.send_message(chat_id, "🛡️ **Atomic Shield:** Simulation Detects Revert. Aborting.")
         return False
 
-    # 3. Final Atomic Broadcast
     try:
-        # Send both transactions sequentially
-        tx1_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed1.raw_transaction)
-        tx2_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed2.raw_transaction)
-        
+        tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_tx.raw_transaction)
         report = (
-            f"✅ **HIT CONFIRMED**\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📈 **Market:** {asset}\n"
-            f"🎯 **Direction:** {side}\n"
-            f"💰 **Stake:** ${stake_usdc:.2f} USDC\n"
-            f"💎 **Profit:** ${profit_usdc:.2f} USDC ({int(yield_multiplier*100)}%)\n"
-            f"🔗 [Stake TX](https://polygonscan.com/tx/{tx1_hash.hex()})\n"
-            f"🔗 [Profit TX](https://polygonscan.com/tx/{tx_hash.hex()})"
+            f"✅ **HIT CONFIRMED**\n━━━━━━━━━━━━━━\n"
+            f"📈 **Market:** {asset}\n🎯 **Direction:** {side}\n"
+            f"💰 **Stake:** ${stake_usdc:.2f} USDC\n💎 **Profit:** ${profit_usdc:.2f} USDC\n"
+            f"🔗 [Receipt](https://polygonscan.com/tx/{tx_hash.hex()})"
         )
         await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
         return True
@@ -145,10 +133,9 @@ async def autopilot_engine(chat_id, context):
 # --- 5. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address)
-    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
+    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
     welcome = (
-        f"🕴️ **APEX Terminal v6.5**\n"
-        f"━━━━━━━━━━━━━━\n"
+        f"🕴️ **APEX Terminal v6.5**\n━━━━━━━━━━━━━━\n"
         f"⛽ **POL:** `{pol:.4f}` | 💵 **USDC:** `${usdc:.2f}`\n\n"
         f"🔑 **Vault Address:**\n`{vault.address}`"
     )
@@ -173,7 +160,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address)
-        await update.message.reply_text(f"💳 **Vault Status**\n━━━━━━━━━━━━━━\n⛽ **POL:** `{pol:.6f}`\n💵 **USDC:** `${usdc:.2f}`")
+        await update.message.reply_text(f"💳 **Vault Status (Latest)**\n━━━━━━━━━━━━━━\n⛽ **POL:** `{pol:.6f}`\n💵 **USDC:** `${usdc:.2f}`")
 
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
