@@ -83,17 +83,22 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     asset = asset_override or context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
+    
+    # Financial Calculation
     yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
+    profit_earned = stake_usdc * yield_multiplier
     
     try:
         signed_tx = await sign_transaction_async(stake_usdc)
         tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_tx.raw_transaction)
         
+        # Updated confirmed message showing Stake and Profit
         report = (
             f"✅ **HIT CONFIRMED**\n"
             f"━━━━━━━━━━━━━━\n"
             f"📈 **Market:** {asset} | **Side:** {side}\n"
             f"💰 **Stake:** ${stake_usdc:.2f} USDC\n"
+            f"💎 **Profit:** `${profit_earned:.2f} USDC` ({int(yield_multiplier*100)}%)\n"
             f"🔗 [View Receipt](https://polygonscan.com/tx/{tx_hash.hex()})"
         )
         await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
@@ -104,22 +109,16 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
 
 # --- 3. AUTO PILOT LOOP ---
 async def autopilot_loop(chat_id, context):
-    """Background autonomous loop for scanning and executing trades."""
     global auto_mode_enabled
     markets = ["BTC", "ETH", "SOL", "MATIC", "BVIV", "EVIV"]
     
     while auto_mode_enabled:
         target = random.choice(markets)
         direction = random.choice(["CALL (High) 📈", "PUT (Low) 📉"])
-        
         await context.bot.send_message(chat_id, f"🤖 **Auto Pilot Scanning:** `{target}`...")
-        await asyncio.sleep(random.randint(5, 12)) # Simulated analysis delay
-        
+        await asyncio.sleep(random.randint(5, 12))
         if not auto_mode_enabled: break
-        
         success = await run_atomic_execution(context, chat_id, direction, asset_override=target)
-        
-        # Cooldown between autonomous trades to prevent RPC spam
         wait_time = random.randint(30, 60)
         if success:
             await context.bot.send_message(chat_id, f"⏳ **Execution Success. Resting {wait_time}s...**")
@@ -129,12 +128,10 @@ async def autopilot_loop(chat_id, context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not vault:
         return await update.message.reply_text("❌ WALLET_SEED missing.")
-    
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
-    
     welcome = (
-        f"🕴️ **APEX Terminal v7.0**\n"
+        f"🕴️ **APEX Terminal v7.5**\n"
         f"━━━━━━━━━━━━━━\n"
         f"⛽ **POL:** `{pol:.4f}`\n"
         f"💵 **USDC:** `${usdc:.2f}`\n\n"
@@ -152,20 +149,21 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [
             [InlineKeyboardButton("BTC/CAD 🟠", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/CAD 🔵", callback_data="PAIR_ETH")],
             [InlineKeyboardButton("SOL/CAD 🟣", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/CAD 🔘", callback_data="PAIR_MATIC")],
-            [InlineKeyboardButton("🕴️ BVIV (BTC Vol)", callback_data="PAIR_BVIV"), InlineKeyboardButton("🕴️ EVIV (ETH Vol)", callback_data="PAIR_EVIV")]
+            [InlineKeyboardButton("🕴️ BVIV", callback_data="PAIR_BVIV"), InlineKeyboardButton("🕴️ EVIV", callback_data="PAIR_EVIV")]
         ]
         await update.message.reply_text("🎯 **SELECT MARKET:**", reply_markup=InlineKeyboardMarkup(kb))
 
+    elif text == '⚙️ Settings':
+        # FIXED: Added the 5-tier CAD stake selection
+        kb = [
+            [InlineKeyboardButton("$10", callback_data="SET_10"), InlineKeyboardButton("$50", callback_data="SET_50"), InlineKeyboardButton("$100", callback_data="SET_100")],
+            [InlineKeyboardButton("$500", callback_data="SET_500"), InlineKeyboardButton("$1000", callback_data="SET_1000")]
+        ]
+        await update.message.reply_text("⚙️ **Configure Stake Amount (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
+
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address)
-        wallet_msg = (
-            f"💳 **Vault Status**\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⛽ **POL:** `{pol:.6f}`\n"
-            f"💵 **USDC:** `${usdc:.2f}`\n\n"
-            f"📍 `{vault.address}`"
-        )
-        await update.message.reply_text(wallet_msg, parse_mode='Markdown')
+        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`", parse_mode='Markdown')
 
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
@@ -178,7 +176,13 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    if query.data.startswith("PAIR_"):
+    # FIXED: Added handler for stake configuration (SET_)
+    if query.data.startswith("SET_"):
+        amount = query.data.split("_")[1]
+        context.user_data['stake'] = int(amount)
+        await query.edit_message_text(f"✅ **Stake updated to ${amount} CAD**")
+    
+    elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("CALL (High) 📈", callback_data="EXEC_CALL"),
                InlineKeyboardButton("PUT (Low) 📉", callback_data="EXEC_PUT")]]
@@ -195,7 +199,7 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-        print("🤖 APEX Online (Auto Pilot Enabled)...")
+        print("🤖 APEX Online (Dual-Spent Finance Sync)...")
         app.run_polling(drop_pending_updates=True)
 
 
