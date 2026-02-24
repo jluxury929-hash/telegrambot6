@@ -48,10 +48,11 @@ async def fetch_balances(address):
     """Checks POL and BOTH USDC types on Polygon using Infura latest state."""
     try:
         clean_addr = w3.to_checksum_address(address)
-        # Force 'latest' to bypass node caching
+        # Force 'latest' to bypass node caching for native POL
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, clean_addr, 'latest')
         pol_bal = w3.from_wei(raw_pol, 'ether')
         
+        # Pull USDC from both contract variants using the 'latest' block tag
         raw_n = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(clean_addr).call, {'block_identifier': 'latest'})
         raw_b = await asyncio.to_thread(usdc_b_contract.functions.balanceOf(clean_addr).call, {'block_identifier': 'latest'})
         
@@ -98,7 +99,6 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
 
     status_msg = await context.bot.send_message(chat_id, f"⚡ **Broadcasting Atomic Hit...**\n💎 `{asset}` | 💵 `${stake_usdc:.2f}`")
 
-    # 
     # Execution: Parallel Simulation and Dual-Signing
     sim_task = asyncio.create_task(market_simulation_1ms(asset))
     prep_task = asyncio.create_task(prepare_dual_payout_txs(stake_usdc, profit_usdc))
@@ -167,8 +167,17 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '💰 Wallet':
+        # Wallet button now uses the same robust sync used for trading
         pol, usdc = await fetch_balances(vault.address)
-        await update.message.reply_text(f"💳 **Vault Status (Latest)**\n━━━━━━━━━━━━━━\n⛽ **POL:** `{pol:.6f}`\n💵 **USDC:** `${usdc:.2f}`")
+        wallet_report = (
+            f"💳 **Atomic Wallet Sync**\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⛽ **Native POL:** `{pol:.6f}`\n"
+            f"💵 **Total USDC:** `${usdc:.2f}`\n\n"
+            f"📍 `{vault.address}`\n"
+            f"Status: **Connected to Infura Mainnet**"
+        )
+        await update.message.reply_text(wallet_report, parse_mode='Markdown')
 
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
@@ -197,7 +206,7 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-        print("🤖 APEX Online (Atomic Logic v6.5)...")
+        print("🤖 APEX Online (Infura Robust Sync)...")
         app.run_polling(drop_pending_updates=True)
 
 
