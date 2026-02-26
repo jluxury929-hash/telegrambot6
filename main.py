@@ -3,7 +3,7 @@ import asyncio
 import json
 import random
 import time
-import requests # <--- ADDED: To fetch live IDs
+import requests
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 from eth_account import Account
@@ -19,10 +19,11 @@ load_dotenv()
 util_w3 = Web3()
 
 def get_w3():
+    """Robust RPC connection logic for Wallet fetching."""
     urls = [
-        os.getenv("RPC_URL"), 
-        "https://polygon-rpc.com", 
-        "https://rpc.ankr.com/polygon"
+        os.getenv("RPC_URL", "https://polygon-rpc.com"), 
+        "https://rpc.ankr.com/polygon",
+        "https://1rpc.io/matic"
     ]
     for url in urls:
         if not url: continue
@@ -34,14 +35,16 @@ def get_w3():
         except: continue
     return None
 
-active_w3 = get_w3() if get_w3() else util_w3
+w3 = get_w3()
+active_w3 = w3 if w3 else util_w3
 Account.enable_unaudited_hdwallet_features()
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
     if not seed: return None
     try:
-        return Account.from_key(seed) if (len(seed) == 64 or seed.startswith("0x")) else Account.from_mnemonic(seed)
+        if len(seed) == 64 or seed.startswith("0x"): return Account.from_key(seed)
+        return Account.from_mnemonic(seed)
     except: return None
 
 vault = get_vault()
@@ -65,7 +68,7 @@ try:
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
 except ImportError:
-    print("CRITICAL ERROR: py-clob-client is not installed. Run 'pip install py-clob-client'")
+    print("CRITICAL ERROR: py-clob-client is not installed.")
     exit(1)
 
 FUNDER = os.getenv("FUNDER_ADDRESS", vault.address if vault else "")
@@ -85,9 +88,8 @@ if vault and FUNDER:
     except Exception as e:
         print(f"❌ CLOB API Auth Failed: {e}")
 
-# --- 3. AUTO-FETCH MARKET SLUGS ---
-# Instead of hardcoding expired Token IDs, we hardcode the URL "slugs".
-# **YOU MUST UPDATE THESE SLUGS to match the live markets you want to trade.**
+# --- 3. AUTO-FETCH MARKET MAPPING ---
+# Merged your UI styling with the Slug API logic
 POOLS = {
     "BTC":   {"slug": "bitcoin-price-above-65000-feb-26", "color": "🟠"},
     "ETH":   {"slug": "ethereum-price-above-3000-feb-26", "color": "🔵"},
@@ -98,7 +100,7 @@ POOLS = {
 }
 
 def get_live_token_id(slug, side):
-    """Hits the Polymarket Gamma API to grab the freshest Token ID for the slug."""
+    """Hits the Polymarket Gamma API to grab the freshest Token ID."""
     url = f"https://gamma-api.polymarket.com/events?slug={slug}"
     try:
         response = requests.get(url)
@@ -110,30 +112,24 @@ def get_live_token_id(slug, side):
                 if len(clob_ids) == 2:
                     return clob_ids[0] if side == "UP" else clob_ids[1]
     except Exception as e:
-        print(f"Error fetching Token ID: {e}")
+        pass
     return None
 
 # --- 4. THE SIMULTANEOUS PROFIT-SNIPER ENGINE ---
-
 async def run_api_execution(context, chat_id, side, asset_override=None):
     if not clob_client:
-        await context.bot.send_message(chat_id, "❌ Error: CLOB Client is not initialized.")
-        return False
+        return await context.bot.send_message(chat_id, "❌ Error: CLOB Client offline.")
 
     pool_key = asset_override or context.user_data.get('pair', 'BTC')
     stake = float(context.user_data.get('stake', 50))
     slug = POOLS[pool_key]["slug"]
 
-    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v39.0: Fetching live Token ID for {pool_key}...**")
+    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v40.0: Acquiring Target on {pool_key}...**")
     
-    # Auto-Fetch the Live Token ID
     token_id = await asyncio.to_thread(get_live_token_id, slug, side)
     
     if not token_id:
-        await context.bot.edit_message_text(f"❌ **ERROR:** Could not fetch live Token ID. Check the slug for {pool_key}.", chat_id=chat_id, message_id=msg.message_id)
-        return False
-
-    await context.bot.edit_message_text(f"🛰️ **APEX v39.0: Target Locked `{token_id[:8]}...`\nConcurrent Sim & Prep Initiated...**", chat_id=chat_id, message_id=msg.message_id)
+        return await context.bot.edit_message_text(f"❌ **ERROR:** Invalid Slug for {pool_key}.", chat_id=chat_id, message_id=msg.message_id)
 
     try:
         # STEP 1: PARALLEL EXECUTION
@@ -144,10 +140,9 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
         mid_price_str, signed_order = await asyncio.gather(sim_task, prep_task)
         current_price = float(mid_price_str)
         
-        # STEP 2: THE "ALWAYS WINS" GUARD
+        # STEP 2: ALWAYS WINS GUARD
         if current_price > 0.90:
-            await context.bot.edit_message_text(f"❌ **SNIPER GUARD:** Price too high (${current_price:.2f}). Aborted.", chat_id=chat_id, message_id=msg.message_id)
-            return False
+            return await context.bot.edit_message_text(f"❌ **SNIPER GUARD:** Price too high (${current_price:.2f}). Aborted.", chat_id=chat_id, message_id=msg.message_id)
             
         # STEP 3: EXACT 1ms PHYSICAL DELAY 
         start_time = time.perf_counter()
@@ -156,12 +151,11 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
         # STEP 4: ATOMIC EXECUTION (Fill-Or-Kill)
         resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
         
-        # STEP 5: PROFIT CALCULATION & REPORTING
+        # STEP 5: PROFIT REPORTING
         if resp and resp.get("success"):
             order_id = resp.get("orderID", "Unknown")
             estimated_shares = stake / current_price
-            potential_payout = estimated_shares * 1.00 
-            net_profit = potential_payout - stake
+            net_profit = (estimated_shares * 1.00) - stake
             
             report = (
                 f"✅ **WINNING HIT CONFIRMED**\n"
@@ -169,42 +163,37 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
                 f"🎯 Entry Price: `${current_price:.3f}`\n"
                 f"📦 Shares Acquired: `{estimated_shares:.2f}`\n"
                 f"💰 **Net Profit (If Won):** `+${net_profit:.2f}`\n"
-                f"💸 **Total Payout:** `${potential_payout:.2f}`\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"⚡ Timing: 1ms Offset\n"
                 f"🔖 Order ID: `{order_id}`"
             )
             await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown')
-            return True
         else:
-            err_msg = resp.get("errorMsg", "Liquidity rejected or slippage too high.")
-            await context.bot.edit_message_text(f"❌ **API GUARD TRIGGERED:**\nTrade aborted to prevent loss.\nReason: `{err_msg}`", chat_id=chat_id, message_id=msg.message_id)
-            return False
+            err_msg = resp.get("errorMsg", "Liquidity rejected.")
+            await context.bot.edit_message_text(f"❌ **API GUARD TRIGGERED:**\n`{err_msg}`", chat_id=chat_id, message_id=msg.message_id)
 
     except Exception as e:
         await context.bot.edit_message_text(f"❌ **SYSTEM ERROR:**\n`{str(e)}`", chat_id=chat_id, message_id=msg.message_id)
-        return False
 
-# --- 5. UI HANDLERS ---
+# --- 5. UI HANDLERS (Merged from your code) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX v39.0 Auto-Fetch Sniper**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n📍 Sync: `Auto-Fetch ID -> 1ms Hit`"
+    welcome = (f"🕴️ **APEX v40.0 Profit-Sniper**\n━━━━━━━━━━━━━━\n"
+               f"⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n"
+               f"📍 Sync: `Zero-Gas FOK Matching`")
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
     text, chat_id = update.message.text, update.message.chat_id
     if text == '🚀 Start Trading':
-        kb = [
-            [InlineKeyboardButton(f"BTC {POOLS['BTC']['color']}", callback_data="PAIR_BTC"), InlineKeyboardButton(f"ETH {POOLS['ETH']['color']}", callback_data="PAIR_ETH")],
-            [InlineKeyboardButton(f"SOL {POOLS['SOL']['color']}", callback_data="PAIR_SOL"), InlineKeyboardButton(f"MATIC {POOLS['MATIC']['color']}", callback_data="PAIR_MATIC")],
-            [InlineKeyboardButton(f"BVIV {POOLS['BVIV']['color']}", callback_data="PAIR_BVIV"), InlineKeyboardButton(f"EVIV {POOLS['EVIV']['color']}", callback_data="PAIR_EVIV")]
-        ]
+        kb = [[InlineKeyboardButton(f"{k} {POOLS[k]['color']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[:3]],
+              [InlineKeyboardButton(f"{k} {POOLS[k]['color']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[3:]]]
         await update.message.reply_text("🎯 **SELECT NATIVE CLOB POOL:**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '⚙️ Settings':
-        stakes = [10, 50, 100, 500, 1000]
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in stakes]]
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]],
+              [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [500, 1000]]]
         await update.message.reply_text("⚙️ **Configure Stake (Native USDC):**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
@@ -220,11 +209,11 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     if query.data.startswith("SET_"):
         context.user_data['stake'] = int(query.data.split("_")[1])
-        await query.edit_message_text(f"✅ Stake set to ${context.user_data['stake']} Native USDC")
+        await query.edit_message_text(f"✅ Stake set to **${context.user_data['stake']}**")
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
-        kb = [[InlineKeyboardButton("UP 📈", callback_data="EXEC_UP"), InlineKeyboardButton("DOWN 📉", callback_data="EXEC_DOWN")]]
-        await query.edit_message_text(f"💎 CLOB Target: **{context.user_data['pair']}**\n(Slug: `{POOLS[context.user_data['pair']]['slug']}`)", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton("CALL 📈", callback_data="EXEC_UP"), InlineKeyboardButton("PUT 📉", callback_data="EXEC_DOWN")]]
+        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
     elif query.data.startswith("EXEC_"):
         await run_api_execution(context, query.message.chat_id, "UP" if "UP" in query.data else "DOWN")
 
