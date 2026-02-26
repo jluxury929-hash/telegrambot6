@@ -76,11 +76,11 @@ except: exit("Install: pip install py-clob-client google-genai requests")
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 4. THE GAP DISCOVERY ENGINE (CRYPTO FOCUS) ---
+# --- 4. CRYPTO-GAP DISCOVERY ENGINE ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
     try:
-        # FILTER: tag_id=100381 is the high-precision Crypto tag for Polymarket Gamma API
+        # tag_id=100381 targets high-precision Crypto Markets
         url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=40&tag_id=100381&order=volume&ascending=false"
         resp = await asyncio.to_thread(requests.get, url, timeout=10)
         markets = resp.json()
@@ -88,38 +88,30 @@ async def force_scour():
         valid_pool = []
         for m in markets:
             prices = m.get('outcomePrices', [0, 0])
-            yes_price = float(prices[0]) if prices else 0
-            
-            # GAP LOGIC: We seek markets where YES > 0.90 but still active.
-            # This is the "Confirmation Gap" where the event likely already occurred.
+            yes_p = float(prices[0]) if prices else 0
             if m.get('clobTokenIds'):
+                # Identify markets in the "Resolution Gap" (High prob but still open)
                 valid_pool.append({
-                    "name": m.get('question', 'CryptoAsset')[:22], 
-                    "token_id": m['clobTokenIds'][0],
-                    "prob": yes_price,
-                    "is_gap": yes_price > 0.90
+                    "name": m.get('question', 'Crypto')[:22], 
+                    "token_id": m['clobTokenIds'][0], 
+                    "prob": yes_p, 
+                    "is_gap": yes_p > 0.90
                 })
 
-        # LAYER 1: AI GAP ANALYZER
+        prompt = (f"Markets: {json.dumps(valid_pool[:25])}. "
+                  "Instruction: Select 8 targets. Prioritize 'is_gap': true to catch winners before the site locks. "
+                  "Return JSON ONLY: [{'name': 'ShortTitle', 'side': 'GAP_WIN', 'token_id': 'ID'}]")
+        
         try:
-            prompt = (f"Crypto Data: {json.dumps(valid_pool[:25])}. "
-                      "Instruction: Select 8 targets currently in the 'Settlement Gap'. "
-                      "Focus on markets with probability > 0.92 where resolution is imminent. "
-                      "Return JSON ONLY: [{'name': 'ShortTitle', 'side': 'GAP_WIN', 'token_id': 'ID'}]")
-            
             ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt, config={'response_mime_type': 'application/json'})
             winners = json.loads(ai_resp.text)
-            if winners:
-                OMNI_STRIKE_CACHE = winners
-                return True
+            if winners: OMNI_STRIKE_CACHE = winners; return True
         except: pass
 
-        # FALLBACK: Sort by highest probability (nearest to win)
         sorted_pool = sorted(valid_pool, key=lambda x: x['prob'], reverse=True)
         OMNI_STRIKE_CACHE = [{"name": x['name'], "side": "GAP_WIN", "token_id": x['token_id']} for x in sorted_pool[:8]]
         return True
-    except:
-        return False
+    except: return False
 
 async def background_loop():
     while True:
@@ -129,52 +121,65 @@ async def background_loop():
 # --- 5. INTERFACE & ATOMIC PARALLEL EXECUTION ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT']]
-    await update.message.reply_text(f"{LOGO}\n<b>ULTRA-GAP SNIPER ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>APEX ULTRA-GAP ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text == '⚔️ START SNIPER':
         msg = await update.message.reply_text("📡 <b>SCANNING RESOLUTION GAPS...</b>", parse_mode='HTML')
         await force_scour()
         await msg.delete()
-        
         kb = [[InlineKeyboardButton(f"⚡ {p['name']} | {p['side']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
         await update.message.reply_text("🌌 <b>SURE-WIN GAPS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
+    elif update.message.text == '⚙️ CALIBRATE':
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500, 1000]]]
+        await update.message.reply_text("⚙️ <b>ADJUST STRIKE LOAD (USDC):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif update.message.text == '💳 VAULT':
+        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
+        report = (
+            f"<code>┌── VAULT_AUDIT ──┐</code>\n"
+            f"  ⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n"
+            f"  💵 USDC: <code>${raw_usdc/1e6:.2f}</code>\n"
+            f"<code>└──────────────────┘</code>"
+        )
+        await update.message.reply_text(report, parse_mode='HTML')
+
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
-    if "HIT_" in query.data:
+    if "SET_" in query.data:
+        val = int(query.data.split("_")[1])
+        context.user_data['stake'] = val
+        await query.edit_message_text(f"✅ <b>STRIKE LOAD CALIBRATED:</b> <code>${val} USDC</code>", parse_mode='HTML')
+    elif "HIT_" in query.data:
         idx = int(query.data.split("_")[1])
         bet = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
-        
-        await query.edit_message_text(f"🚀 <b>PARALLEL STRIKE INITIATED:</b> {bet['name']}")
+        await query.edit_message_text(f"🚀 <b>PARALLEL STRIKE:</b> {bet['name']}")
 
-        # --- THE PARALLEL ENGINE ---
+        # Concurrent Simulation Pulse (CPU Core Lock)
         async def run_simulation():
-            """High-precision busy-wait to lock CPU core state."""
             s = time.perf_counter()
-            while (time.perf_counter() - s) < 0.0010: # 1ms Pulse
-                pass
+            while (time.perf_counter() - s) < 0.0010: pass # 1ms Pulse
             return True
 
+        # Parallel Order Transmission
         async def execute_order():
-            """Direct CLOB Order Transmission"""
             try:
-                order = await asyncio.to_thread(clob_client.create_market_order, 
-                                                MarketOrderArgs(token_id=bet['token_id'], amount=stake, side=BUY))
+                order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=bet['token_id'], amount=stake, side=BUY))
                 return await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-            except:
-                return {"success": False}
+            except: return {"success": False}
 
         try:
-            # GATHER: Fires the trade request and the simulation pulse at the exact same microsecond.
+            # GATHER: Network request travels while 1ms Simulation keeps thread hot
             sim_res, resp = await asyncio.gather(run_simulation(), execute_order())
             
             if resp.get("success"):
                 await context.bot.send_message(query.message.chat_id, WIN_LOGO, parse_mode='HTML')
             else:
-                await context.bot.send_message(query.message.chat_id, "⚠️ <b>GAP CLOSED - TARGET LOCKED</b>")
+                await context.bot.send_message(query.message.chat_id, "⚠️ <b>GAP CLOSED - TARGET LOCKED</b>", parse_mode='HTML')
         except:
             await context.bot.send_message(query.message.chat_id, LOSE_LOGO, parse_mode='HTML')
 
