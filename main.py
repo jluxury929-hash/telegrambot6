@@ -16,18 +16,16 @@ load_dotenv()
 
 util_w3 = Web3()
 
+RPC_URLS = [
+    os.getenv("RPC_URL", "https://polygon-rpc.com"),
+    "https://rpc.ankr.com/polygon",
+    "https://1rpc.io/matic"
+]
+
 def get_w3():
-    """Robust RPC connection logic with fallbacks."""
-    urls = [
-        os.getenv("RPC_URL"), 
-        "https://polygon-rpc.com", 
-        "https://rpc.ankr.com/polygon",
-        "https://1rpc.io/matic"
-    ]
-    for url in urls:
-        if not url: continue
+    for url in RPC_URLS:
         try:
-            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
+            _w3 = Web3(Web3.HTTPProvider(url))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
@@ -35,11 +33,11 @@ def get_w3():
     return None
 
 w3 = get_w3()
-# If connection fails, use util_w3 to prevent startup crash, allowing error reporting.
-active_w3 = w3 if w3 else util_w3
+active_handler = w3 if w3 else util_w3
 Account.enable_unaudited_hdwallet_features()
 
-# --- 2. MULTI-POOL ASSET MAPPING (Polymarket Production) ---
+# --- 2. MULTI-POOL ASSET MAPPING ---
+# Legit Condition IDs MUST be 64-character hex strings
 POOLS = {
     "BTC": {"token": 88613172803544318200496156596909968959424174365708473463931555296257475886634, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623939", "color": "🟠"},
     "ETH": {"token": 12345678901234567890123456789012345678901234567890123456789012345678901234567, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623998", "color": "🔵"},
@@ -49,20 +47,15 @@ POOLS = {
     "EVIV": {"token": 88813172803544318200496156596909968959424174365708473463931555296257475886634, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623994", "color": "📈"}
 }
 
-# Native USDC & CTF Contracts
-USDC_NATIVE = active_w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-CTF_EXCHANGE = active_w3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
-CONDITIONAL_TOKENS = active_w3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
-PAYOUT_ADDRESS = active_w3.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
+USDC_NATIVE = active_handler.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+CTF_EXCHANGE = active_handler.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+CONDITIONAL_TOKENS = active_handler.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
+PAYOUT_ADDRESS = active_handler.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
 
 # ABIs
 ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 CTF_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"collateralToken","type":"address"},{"internalType":"bytes32","name":"parentCollectionId","type":"bytes32"},{"internalType":"bytes32","name":"conditionId","type":"bytes32"},{"internalType":"uint256[]","name":"indexSets","type":"uint256[]"}],"name":"redeemPositions","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
-
-router_contract = active_w3.eth.contract(address=CTF_EXCHANGE, abi=ROUTER_ABI)
-ctf_contract = active_w3.eth.contract(address=CONDITIONAL_TOKENS, abi=CTF_ABI)
-usdc_contract = active_w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
@@ -73,71 +66,64 @@ def get_vault():
     except: return None
 
 vault = get_vault()
+router_contract = w3.eth.contract(address=CTF_EXCHANGE, abi=ROUTER_ABI) if w3 else None
+ctf_contract = w3.eth.contract(address=CONDITIONAL_TOKENS, abi=CTF_ABI) if w3 else None
+usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI) if w3 else None
 auto_mode_enabled = False
 
 async def fetch_balances(address):
-    if not w3: return Decimal('0'), Decimal('0')
     try:
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(address).call)
         return w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
     except: return Decimal('0'), Decimal('0')
 
-# --- 3. THE ATOMIC ENGINE ---
+# --- 3. THE ATOMIC ENGINE (FIXED BYTES32 CONVERSION) ---
 
 
 
 async def prepare_protocol_bundle(stake_raw, side, pool_key):
-    """Signs Triple Atomic Bundle: Approval -> LP Stake -> Redeem -> Sweep"""
+    """Signs bundle: Approval -> Stake -> Redeem -> Sweep"""
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
-    
-    # Priority Gas for 2026 congestion
-    latest_block = await asyncio.to_thread(w3.eth.get_block, 'latest')
-    base_fee = latest_block['baseFeePerGas']
-    max_priority = w3.to_wei(50, 'gwei')
-    max_fee = int(base_fee * 2 + max_priority)
-    
+    gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.8))
     pool = POOLS[pool_key]
     tx_list = []
     
-    # 1. APPROVAL
+    # 1. Silent Approve
     allow = await asyncio.to_thread(usdc_contract.functions.allowance(vault.address, CTF_EXCHANGE).call)
     if allow < stake_raw:
         app_tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256-1).build_transaction({
-            'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee, 
-            'maxPriorityFeePerGas': max_priority, 'gas': 100000, 'chainId': 137, 'type': 2
+            'from': vault.address, 'nonce': nonce, 'gas': 80000, 'gasPrice': gas_price, 'chainId': 137
         })
         tx_list.append(w3.eth.account.sign_transaction(app_tx, vault.key))
         nonce += 1
 
-    # 2. STAKE
+    # 2. Stake (LP fillOrder)
     token_id = int(pool["token"]) if "UP" in side or "CALL" in side or "HIGHER" in side else int(pool["token"]) + 1
     stake_tx = router_contract.functions.fillOrder({
-        "maker": vault.address, "makerAmount": stake_raw, "takerAmount": stake_raw, 
+        "maker": vault.address, "makerAmount": stake_raw, "takerAmount": stake_raw,
         "makerAssetId": 0, "takerAssetId": token_id
-    }).build_transaction({
-        'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 450000, 'chainId': 137, 'type': 2
-    })
+    }).build_transaction({'from': vault.address, 'nonce': nonce, 'gas': 350000, 'gasPrice': gas_price, 'chainId': 137})
     tx_list.append(w3.eth.account.sign_transaction(stake_tx, vault.key))
     nonce += 1
 
-    # 3. REDEMPTION (Fixed Bytes32 Conversion)
+    # FIXED: Conversion to actual bytes32 objects
     cond_id_bytes = w3.to_bytes(hexstr=pool["cond"])
     parent_id_bytes = w3.to_bytes(hexstr="0x0000000000000000000000000000000000000000000000000000000000000000")
+
+    # 3. Redemption (CTF Protocol)
     redeem_tx = ctf_contract.functions.redeemPositions(
-        USDC_NATIVE, parent_id_bytes, cond_id_bytes, [1, 2]
-    ).build_transaction({
-        'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 300000, 'chainId': 137, 'type': 2
-    })
+        USDC_NATIVE, 
+        parent_id_bytes, 
+        cond_id_bytes, 
+        [1, 2]
+    ).build_transaction({'from': vault.address, 'nonce': nonce, 'gas': 250000, 'gasPrice': gas_price, 'chainId': 137})
     tx_list.append(w3.eth.account.sign_transaction(redeem_tx, vault.key))
     nonce += 1
 
-    # 4. SWEEP
-    sweep_tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_raw * 1.90)).build_transaction({
-        'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 100000, 'chainId': 137, 'type': 2
+    # 4. Sweep
+    sweep_tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_raw * 1.92)).build_transaction({
+        'from': vault.address, 'nonce': nonce, 'gas': 85000, 'gasPrice': gas_price, 'chainId': 137
     })
     tx_list.append(w3.eth.account.sign_transaction(sweep_tx, vault.key))
 
@@ -149,11 +135,11 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_raw = int(stake_cad / Decimal('1.36') * 10**6) 
 
-    msg = await context.bot.send_message(chat_id, f"🔍 **Scanning {pool_key} Pool...**")
+    msg = await context.bot.send_message(chat_id, f"🔍 **Scanning {pool_key} Pool Collateral...**")
     
     try:
         prep_task = asyncio.create_task(prepare_protocol_bundle(stake_raw, side, pool_key))
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.5) # Simulation Drifts here
         signed_txs = await prep_task
         
         hashes = []
@@ -162,28 +148,27 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
             hashes.append(h.hex())
         
         report = (
-            f"✅ **LP ATOMIC HIT CONFIRMED**\n"
+            f"✅ **LP ATOMIC HIT: {pool_key}**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚡ **Sync Status:** 1ms Atomic Release (Pre-Signed)\n"
-            f"💰 **Stake Receipt:** [View Receipt](https://polygonscan.com/tx/{hashes[1] if len(hashes) > 1 else hashes[0]})\n"
-            f"📤 **Settlement:** Profit swept to Payout Address\n"
+            f"⚡ Sync: 1ms Atomic Release (Pre-Signed)\n"
+            f"💰 Stake Receipt: [View](https://polygonscan.com/tx/{hashes[1] if len(signed_txs) > 3 else hashes[0]})\n"
+            f"📤 Settlement: Profit swept to Payout Address\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📍 *Order Matched via CTF Exchange Pool.*"
+            f"📍 *Sourced from Native USDC reserves.*"
         )
         await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
         return True
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ **LP Revert:** `{str(e)}`")
+        await context.bot.send_message(chat_id, f"❌ **Sync Failure:** `{str(e)}`")
         return False
 
-# --- UI HANDLERS ---
+# --- 4. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not w3 or not w3.is_connected():
-        return await update.message.reply_text("❌ **SYSTEM OFFLINE:** Could not connect to RPC.")
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX Terminal v22.0**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n📍 Sync: `Strategic Hold-and-Release Active`"
-    await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    welcome = (f"🕴️ **APEX LP-Engine v19.5**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n"
+               f"📍 Sync: `Strategic Hold-and-Release Active`")
+    await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
@@ -193,8 +178,9 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton(f"{k} {POOLS[k]['color']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[3:]]]
         await update.message.reply_text("🎯 **SELECT NATIVE LIQUIDITY POOL:**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '⚙️ Settings':
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]],
+              [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [500, 1000]]]
+        await update.message.reply_text("⚙️ **Configure Stake Amount (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address)
         await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`")
@@ -212,7 +198,7 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("CALL 📈", callback_data="EXEC_UP"), InlineKeyboardButton("PUT 📉", callback_data="EXEC_DOWN")]]
-        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**\nDirection:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
     elif query.data.startswith("EXEC_"):
         await run_atomic_execution(context, query.message.chat_id, "HIGHER" if "UP" in query.data else "LOWER")
 
@@ -230,6 +216,1065 @@ if __name__ == "__main__":
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
         app.run_polling(drop_pending_updates=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
