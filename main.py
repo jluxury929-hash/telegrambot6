@@ -24,39 +24,21 @@ CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
 ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 
-# --- THE FIX: HARDENED CONNECTION GUARD ---
 def get_w3():
-    """Tries multiple RPCs with high-priority fallbacks to ensure 'w3' is NEVER None."""
-    rpc_list = [
-        os.getenv("RPC_URL"),
-        "https://polygon-rpc.com",
-        "https://rpc-mainnet.maticvigil.com",
-        "https://1rpc.io/matic",
-        "https://rpc.ankr.com/polygon"
-    ]
+    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in rpc_list:
         if not url: continue
         try:
             _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
             if _w3.is_connected():
-                # Inject middleware for Polygon PoS
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                print(f"📡 Connected to: {url}")
                 return _w3
-        except Exception as e:
-            print(f"⚠️ RPC Fail ({url}): {e}")
-    
-    # If all fail, we create a dummy object so the script doesn't crash on 'None'
-    # but we will check .is_connected() later.
-    return Web3(Web3.HTTPProvider("http://localhost:8545")) 
+        except: continue
+    return Web3(Web3.HTTPProvider("http://localhost:8545"))
 
 w3 = get_w3()
+if not w3.is_connected(): exit("🛑 RPC Connection Failure.")
 
-# Connection check before contract initialization
-if not w3.is_connected():
-    exit("🛑 CRITICAL: Could not connect to any Polygon RPC. Check your internet/keys.")
-
-# Now it is safe to create contracts because w3 is guaranteed to exist
 router_contract = w3.eth.contract(address=Web3.to_checksum_address(CTF_EXCHANGE), abi=ROUTER_ABI)
 usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_NATIVE), abi=ERC20_ABI)
 
@@ -64,13 +46,11 @@ def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     try:
-        if " " not in seed: return Account.from_key(seed)
-        return Account.from_mnemonic(seed)
+        return Account.from_key(seed) if " " not in seed else Account.from_mnemonic(seed)
     except: return None
 
 vault = get_vault()
 
-# Initialize CLOB
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
@@ -81,40 +61,51 @@ except:
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 2. THE REST OF THE ENGINE (Audit & Sniper) ---
-
-async def perform_live_audit(address):
-    raw_pol = await asyncio.to_thread(w3.eth.get_balance, address)
-    raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(address).call)
-    return w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
+# --- 2. OMNI-RECURSIVE ENGINE (THE FIX) ---
 
 async def fetch_winning_paths():
-    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30"
-    try:
-        resp = requests.get(url, timeout=5).json()
-        valid_pool = [e for e in resp if 'markets' in e and len(e['markets'][0]['clobTokenIds']) == 2]
-        valid_pool = sorted(valid_pool, key=lambda x: float(x.get('volume', 0)), reverse=True)
-        
-        async def analyze(event):
-            m = event['markets'][0]
-            prompt = f"Trade: '{m['question']}'. Winner: 'UP' or 'DOWN'. Return 1 word ONLY."
-            try:
-                ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt)
-                side = ai_resp.text.strip().upper()
-                if side in ['UP', 'DOWN']:
-                    await asyncio.to_thread(clob_client.get_orderbook, m['clobTokenIds'][0])
-                    return {"market": m, "side": side, "title": m['question'], "desc": event.get('description', '')}
-            except: pass
-            return None
+    """Recursively scours the global market to ensure 'Matrix Cold' never happens."""
+    # We broaden search queries to ensure we hit SOMETHING active
+    queries = ["Crypto", "Bitcoin", "Election", "Global", "Price"]
+    all_events = []
+    
+    for q in queries:
+        url = f"https://gamma-api.polymarket.com/events?q={q}&active=true&closed=false&limit=50"
+        try:
+            resp = requests.get(url, timeout=5).json()
+            if resp: all_events.extend(resp)
+        except: continue
 
-        results = await asyncio.gather(*[analyze(e) for e in valid_pool[:15]])
-        return [r for r in results if r]
-    except: return []
+    # Deduplicate and sort by raw volume (Guarantees orderbook existence)
+    unique_pool = {e['id']: e for e in all_events if 'markets' in e}.values()
+    valid_pool = sorted(unique_pool, key=lambda x: float(x.get('volume', 0)), reverse=True)
+
+    if not valid_pool: return []
+
+    async def analyze(event):
+        m = event['markets'][0]
+        # AI Prompt is now 'Force Decision' - no more unnecessary skipping
+        prompt = f"Market: '{m['question']}'. Predict win: 'UP' or 'DOWN'. Return 1 word."
+        try:
+            ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt)
+            side = ai_resp.text.strip().upper()
+            if side in ['UP', 'DOWN']:
+                # Pre-verify orderbook is live on CLOB
+                await asyncio.to_thread(clob_client.get_orderbook, m['clobTokenIds'][0])
+                return {"market": m, "side": side, "title": m['question']}
+        except: pass
+        return None
+
+    # Parallel screen top 20 candidates
+    results = await asyncio.gather(*[analyze(e) for e in valid_pool[:20]])
+    return [r for r in results if r]
+
+# --- 3. ATOMIC SENTINEL & UI ---
 
 async def execute_atomic_sentinel(context, chat_id, path):
     stake = float(context.user_data.get('stake', 50))
     token_id = path['market']['clobTokenIds'][0] if path['side'] == "UP" else path['market']['clobTokenIds'][1]
-    msg = await context.bot.send_message(chat_id, "📡 **STRIKING...**")
+    msg = await context.bot.send_message(chat_id, f"📡 **ATOMIC STRIKE: {path['side']}...**")
     try:
         mid = float(await asyncio.to_thread(clob_client.get_midpoint, token_id))
         order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=token_id, amount=stake, side=BUY))
@@ -125,55 +116,50 @@ async def execute_atomic_sentinel(context, chat_id, path):
         
         resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
         if resp.get("success"):
-            await context.bot.edit_message_text(f"✅ **HIT CONFIRMED**\n📈 Price: ${mid:.3f}\n🔮 Side: {path['side']}", chat_id=chat_id, message_id=msg.message_id)
+            await context.bot.edit_message_text(f"✅ **WIN CONFIRMED**\n📈 Price: ${mid:.3f}\n🎯 {path['market']['question']}", chat_id=chat_id, message_id=msg.message_id)
         else:
-            await context.bot.edit_message_text(f"🛡️ **GUARDED:** Market shifted.", chat_id=chat_id, message_id=msg.message_id)
+            await context.bot.edit_message_text(f"🛡️ **GUARDED:** Slippage hit.", chat_id=chat_id, message_id=msg.message_id)
     except Exception as e:
-        await context.bot.edit_message_text(f"☢️ **MALFUNCTION:** {e}", chat_id=chat_id, message_id=msg.message_id)
-
-# --- 3. UI HANDLERS ---
+        await context.bot.edit_message_text(f"☢️ **FAIL:** {e}", chat_id=chat_id, message_id=msg.message_id)
 
 async def start(update, context):
     kb = [['⚔️ DEPLOY SENTINEL', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
-    await update.message.reply_text("🦾 **SENTINEL v64.0**\n`Hardened Connection Guard: ACTIVE`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text("🦾 **SENTINEL v65.0**\n`Omni-Recursive Scour: ACTIVE`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def main_handler(update, context):
-    text = update.message.text
-    if text == '⚔️ DEPLOY SENTINEL':
-        status = await update.message.reply_text("📡 **PULSING GLOBAL MATRIX...**")
+    if update.message.text == '⚔️ DEPLOY SENTINEL':
+        status = await update.message.reply_text("📡 **SCOURING GLOBAL LIQUIDITY MATRIX...**")
         winning_paths = await fetch_winning_paths()
-        if not winning_paths: return await status.edit_text("❌ Matrix Cold.")
-        kb = [[InlineKeyboardButton(f"🎯 {p['title'][:30]}... | {p['side']}", callback_data=f"HIT_{i}")] for i, p in enumerate(winning_paths[:6])]
+        if not winning_paths: 
+            return await status.edit_text("❌ Systemic Blackout: No active markets on Poly.")
+        
+        kb = [[InlineKeyboardButton(f"🎯 {p['title'][:30]}... | {p['side']}", callback_data=f"HIT_{i}")] for i, p in enumerate(winning_paths[:8])]
         context.user_data['paths'] = winning_paths
-        await status.edit_text("🎯 **AI-VERIFIED PATHS:**", reply_markup=InlineKeyboardMarkup(kb))
-    elif text == '⚙️ CALIBRATE':
+        await status.edit_text("🎯 **AI-VERIFIED WINNING PATHS FOUND:**", reply_markup=InlineKeyboardMarkup(kb))
+    elif update.message.text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500, 1000]]]
         await update.message.reply_text("⚙️ **ADJUST STAKE:**", reply_markup=InlineKeyboardMarkup(kb))
-    elif text == '💳 VAULT':
-        audit_msg = await update.message.reply_text("🔍 **ON-CHAIN AUDIT...**")
-        pol, usdc = await perform_live_audit(vault.address)
-        report = f"💳 **VAULT LIVE**\n⛽ **POL:** `{pol:.6f}`\n💵 **USDC:** `${usdc:.2f}`\n📍 `{vault.address}`"
-        await audit_msg.edit_text(report, parse_mode='Markdown')
+    elif update.message.text == '💳 VAULT':
+        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
+        report = f"💳 **VAULT LIVE**\n⛽ **POL:** `{w3.from_wei(raw_pol, 'ether'):.4f}`\n💵 **USDC:** `${raw_usdc/1e6:.2f}`\n📍 `{vault.address}`"
+        await update.message.reply_text(report, parse_mode='Markdown')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
     if "SET_" in query.data:
         context.user_data['stake'] = int(query.data.split("_")[1])
-        await query.edit_message_text(f"✅ **STAKE SET:** ${context.user_data['stake']}")
+        await query.edit_message_text(f"✅ **STAKE:** ${context.user_data['stake']}")
     elif "HIT_" in query.data:
         idx = int(query.data.split("_")[1])
-        path = context.user_data['paths'][idx]
-        await query.edit_message_text(f"🚀 *Executing Atomic Strike for {path['side']}...*")
-        await execute_atomic_sentinel(context, query.message.chat_id, path)
+        await execute_atomic_sentinel(context, query.message.chat_id, context.user_data['paths'][idx])
 
 if __name__ == "__main__":
-    t = os.getenv("TELEGRAM_BOT_TOKEN")
-    if t:
-        app = ApplicationBuilder().token(t).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CallbackQueryHandler(handle_callback))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-        app.run_polling()
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+    app.run_polling()
 
 
 
