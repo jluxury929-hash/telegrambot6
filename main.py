@@ -12,6 +12,7 @@ getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
+# Polymarket CTF Exchange & USDC (EIP-55 Checksummed)
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 
@@ -21,48 +22,35 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v113-UNKILLABLE</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v115-FULL-RECOVERY</code>
 """
 
-# --- 2. THE GUARANTEED CONNECTION FIX ---
+WIN_LOGO = "<code>✅ STRIKE SUCCESSFUL: POSITION LOADED</code>"
+LOSE_LOGO = "<code>❌ STRIKE FAILED: ORDER REJECTED</code>"
+
+# --- 2. UNKILLABLE NETWORK LAYER ---
 def get_hardened_w3():
-    # Massive list of backup nodes to prevent NoneType error
     rpc_list = [
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
         "https://rpc.ankr.com/polygon",
         "https://polygon.llamarpc.com",
-        "https://1rpc.io/matic",
-        "https://rpc-mainnet.maticvigil.com"
+        "https://1rpc.io/matic"
     ]
-    
-    print("📡 Booting Network Layer...")
-    for attempt in range(3): # Try 3 full cycles
-        for url in rpc_list:
-            if not url or len(url) < 10: continue
-            try:
-                _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
-                if _w3.is_connected():
-                    _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                    print(f"✅ Connected to Node: {url[:20]}...")
-                    return _w3
-            except:
-                continue
-        print(f"⚠️  Cycle {attempt+1} failed. Retrying in 5s...")
-        time.sleep(5)
+    for url in rpc_list:
+        if not url or len(url) < 10: continue
+        try:
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            if _w3.is_connected():
+                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                print(f"✅ Connected: {url[:25]}...")
+                return _w3
+        except: continue
     return None
 
-# CRITICAL: Initialize w3 safely
 w3 = get_hardened_w3()
-if w3 is None:
-    # If we still fail, we create a dummy connection so the bot doesn't crash, 
-    # but we prevent execution.
-    print("☢️ FATAL: All Polygon nodes are unreachable.")
-    exit()
+if w3 is None: exit("☢️ FATAL: All RPC Nodes Offline.")
 
-
-
-# Now this will never throw 'NoneType' error
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
@@ -81,23 +69,24 @@ def preflight_auth():
     addr = Web3.to_checksum_address(vault.address)
     try:
         if usdc_contract.functions.allowance(addr, CTF_EXCHANGE).call() < 10**12:
+            print("🛠️  SILENT PREFLIGHT: Authenticating USDC...")
             tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
                 'from': addr, 'nonce': w3.eth.get_transaction_count(addr), 'gasPrice': w3.eth.gas_price
             })
             w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
-            print("✅ USDC Auth Fixed.")
-    except: pass
+    except Exception as e: print(f"⚠️  AUTH SKIPPED: {e}")
 
+# CLOB Client Setup - Fixed for Signature Type 1
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-# Force Signature Type 1 for reliability
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
 try: clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 except: pass
 
-# --- 4. ENGINE ---
+# --- 4. ENGINE: STRICT ID GUARANTEE ---
+
 async def force_scour():
     global OMNI_STRIKE_CACHE
     try:
@@ -106,14 +95,18 @@ async def force_scour():
         events = resp.json()
         valid_pool = []
         for e in events:
-            m = e.get('markets', [])
-            if m:
-                outcomes = json.loads(m[0].get('outcomes', '[]'))
-                tids = m[0].get('clobTokenIds', [])
+            markets = e.get('markets', [])
+            if markets:
+                m = markets[0]
+                outcomes = json.loads(m.get('outcomes', '[]'))
+                tids = m.get('clobTokenIds', [])
                 tid = None
+                # FIXED: Logic to pair 'Yes/Up' label with correct Token ID index
                 for i, label in enumerate(outcomes):
-                    if label.lower() in ['yes', 'over', 'up'] and i < len(tids):
+                    if label.lower() in ['yes', 'over', 'up', 'more'] and i < len(tids):
                         tid = str(tids[i])
+                        break
+                if not tid and tids: tid = str(tids[0])
                 if tid:
                     valid_pool.append({"name": e.get('title')[:22], "token_id": tid, "vol": float(e.get('volume', 0))})
         valid_pool.sort(key=lambda x: x['vol'], reverse=True)
@@ -121,17 +114,18 @@ async def force_scour():
         return True
     except: return False
 
-# --- 5. INTERFACE ---
 async def background_loop():
     while True:
         await force_scour(); await asyncio.sleep(120)
 
+# --- 5. INTERFACE & EXECUTION ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
     await update.message.reply_text(f"{LOGO}\n<b>APEX ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
-    if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
+    text = update.message.text
+    if text in ['⚔️ START SNIPER', '🔄 REFRESH']:
         await force_scour()
         if not OMNI_STRIKE_CACHE:
             await update.message.reply_text("☢️ SCANNING FAILURE")
@@ -139,10 +133,10 @@ async def main_handler(update, context):
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
         await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif update.message.text == '⚙️ CALIBRATE':
+    elif text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
         await update.message.reply_text("⚙️ <b>LOAD:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif update.message.text == '💳 VAULT':
+    elif text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
         await update.message.reply_text(f"⛽ POL: {w3.from_wei(raw_pol, 'ether'):.4f}\n💵 USDC: ${raw_usdc/1e6:.2f}")
@@ -157,9 +151,11 @@ async def handle_callback(update, context):
         stake = float(context.user_data.get('stake', 10))
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
         try:
-            order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=target['token_id'], amount=stake, side=BUY))
+            order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
+                token_id=target['token_id'], amount=stake, side=BUY
+            ))
             resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-            msg = "✅ SUCCESS" if resp.get("success") else f"❌ FAIL: {resp.get('errorMsg')}"
+            msg = WIN_LOGO if resp.get("success") else f"{LOSE_LOGO}\n<code>{resp.get('errorMsg')}</code>"
             await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
         except Exception as e:
             await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:100]}", parse_mode='HTML')
@@ -172,7 +168,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
-
 
 
 
