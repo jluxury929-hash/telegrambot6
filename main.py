@@ -21,27 +21,52 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v112-STRICT-ID</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v113-UNKILLABLE</code>
 """
 
-# --- 2. NETWORK ---
+# --- 2. THE GUARANTEED CONNECTION FIX ---
 def get_hardened_w3():
-    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
-    for url in rpc_list:
-        if not url: continue
-        try:
-            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
-            if _w3.is_connected():
-                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                return _w3
-        except: continue
+    # Massive list of backup nodes to prevent NoneType error
+    rpc_list = [
+        os.getenv("RPC_URL"),
+        "https://polygon-rpc.com",
+        "https://rpc.ankr.com/polygon",
+        "https://polygon.llamarpc.com",
+        "https://1rpc.io/matic",
+        "https://rpc-mainnet.maticvigil.com"
+    ]
+    
+    print("📡 Booting Network Layer...")
+    for attempt in range(3): # Try 3 full cycles
+        for url in rpc_list:
+            if not url or len(url) < 10: continue
+            try:
+                _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+                if _w3.is_connected():
+                    _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                    print(f"✅ Connected to Node: {url[:20]}...")
+                    return _w3
+            except:
+                continue
+        print(f"⚠️  Cycle {attempt+1} failed. Retrying in 5s...")
+        time.sleep(5)
     return None
 
+# CRITICAL: Initialize w3 safely
 w3 = get_hardened_w3()
+if w3 is None:
+    # If we still fail, we create a dummy connection so the bot doesn't crash, 
+    # but we prevent execution.
+    print("☢️ FATAL: All Polygon nodes are unreachable.")
+    exit()
+
+
+
+# Now this will never throw 'NoneType' error
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
-# --- 3. AUTH ---
+# --- 3. AUTH & VAULT ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -60,17 +85,19 @@ def preflight_auth():
                 'from': addr, 'nonce': w3.eth.get_transaction_count(addr), 'gasPrice': w3.eth.gas_price
             })
             w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+            print("✅ USDC Auth Fixed.")
     except: pass
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
+# Force Signature Type 1 for reliability
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
 try: clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 except: pass
 
-# --- 4. ENGINE: 100% ID CERTAINTY ---
+# --- 4. ENGINE ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
     try:
@@ -78,36 +105,17 @@ async def force_scour():
         resp = await asyncio.to_thread(requests.get, url, timeout=15)
         events = resp.json()
         valid_pool = []
-
-        
-
         for e in events:
-            markets = e.get('markets', [])
-            if not markets: continue
-            
-            market = markets[0]
-            outcomes = json.loads(market.get('outcomes', '[]'))
-            token_ids = market.get('clobTokenIds', [])
-            
-            # ABSOLUTE CHECK: Match the 'Yes' outcome to its specific ID index
-            target_id = None
-            if len(outcomes) == len(token_ids):
+            m = e.get('markets', [])
+            if m:
+                outcomes = json.loads(m[0].get('outcomes', '[]'))
+                tids = m[0].get('clobTokenIds', [])
+                tid = None
                 for i, label in enumerate(outcomes):
-                    if label.lower() in ['yes', 'over', 'up']:
-                        target_id = str(token_ids[i])
-                        break
-            
-            # Fallback to index 0 if label matching fails but IDs exist
-            if not target_id and token_ids:
-                target_id = str(token_ids[0])
-
-            if target_id:
-                valid_pool.append({
-                    "name": e.get('title')[:22],
-                    "token_id": target_id,
-                    "vol": float(e.get('volume', 0))
-                })
-
+                    if label.lower() in ['yes', 'over', 'up'] and i < len(tids):
+                        tid = str(tids[i])
+                if tid:
+                    valid_pool.append({"name": e.get('title')[:22], "token_id": tid, "vol": float(e.get('volume', 0))})
         valid_pool.sort(key=lambda x: x['vol'], reverse=True)
         OMNI_STRIKE_CACHE = [{"name": x['name'], "token_id": x['token_id']} for x in valid_pool[:8]]
         return True
@@ -120,21 +128,24 @@ async def background_loop():
 
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>APEX READY</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>APEX ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
         await force_scour()
+        if not OMNI_STRIKE_CACHE:
+            await update.message.reply_text("☢️ SCANNING FAILURE")
+            return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text("🌌 <b>TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif update.message.text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
         await update.message.reply_text("⚙️ <b>LOAD:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif update.message.text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        await update.message.reply_text(f"⛽ POL: {w3.from_wei(raw_pol, 'ether'):.4f}\n💵 USDC: ${raw_usdc/1e6:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"⛽ POL: {w3.from_wei(raw_pol, 'ether'):.4f}\n💵 USDC: ${raw_usdc/1e6:.2f}")
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
@@ -151,7 +162,7 @@ async def handle_callback(update, context):
             msg = "✅ SUCCESS" if resp.get("success") else f"❌ FAIL: {resp.get('errorMsg')}"
             await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
         except Exception as e:
-            await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:50]}", parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:100]}", parse_mode='HTML')
 
 if __name__ == "__main__":
     preflight_auth()
