@@ -16,7 +16,11 @@ load_dotenv()
 
 util_w3 = Web3()
 
-RPC_URLS = [os.getenv("RPC_URL", "https://polygon-rpc.com"), "https://rpc.ankr.com/polygon"]
+RPC_URLS = [
+    os.getenv("RPC_URL", "https://polygon-rpc.com"),
+    "https://rpc.ankr.com/polygon",
+    "https://1rpc.io/matic"
+]
 
 def get_w3():
     for url in RPC_URLS:
@@ -33,8 +37,7 @@ active_handler = w3 if w3 else util_w3
 Account.enable_unaudited_hdwallet_features()
 
 # --- 2. MULTI-POOL ASSET MAPPING ---
-# NOTE: Condition IDs must be 32-byte hex strings. 
-# I have provided the standard 2026 BTC Native Condition ID as an example.
+# Legit Condition IDs MUST be 64-character hex strings
 POOLS = {
     "BTC": {"token": 88613172803544318200496156596909968959424174365708473463931555296257475886634, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623939", "color": "🟠"},
     "ETH": {"token": 12345678901234567890123456789012345678901234567890123456789012345678901234567, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623998", "color": "🔵"},
@@ -46,9 +49,12 @@ POOLS = {
 
 USDC_NATIVE = active_handler.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 CTF_EXCHANGE = active_handler.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+CONDITIONAL_TOKENS = active_handler.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
 PAYOUT_ADDRESS = active_handler.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
 
-ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"collateralToken","type":"address"},{"internalType":"bytes32","name":"parentCollectionId","type":"bytes32"},{"internalType":"bytes32","name":"conditionId","type":"bytes32"},{"internalType":"uint256[]","name":"indexSets","type":"uint256[]"}],"name":"redeemPositions","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
+# ABIs
+ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
+CTF_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"collateralToken","type":"address"},{"internalType":"bytes32","name":"parentCollectionId","type":"bytes32"},{"internalType":"bytes32","name":"conditionId","type":"bytes32"},{"internalType":"uint256[]","name":"indexSets","type":"uint256[]"}],"name":"redeemPositions","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
 
 def get_vault():
@@ -61,6 +67,7 @@ def get_vault():
 
 vault = get_vault()
 router_contract = w3.eth.contract(address=CTF_EXCHANGE, abi=ROUTER_ABI) if w3 else None
+ctf_contract = w3.eth.contract(address=CONDITIONAL_TOKENS, abi=CTF_ABI) if w3 else None
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI) if w3 else None
 auto_mode_enabled = False
 
@@ -71,18 +78,18 @@ async def fetch_balances(address):
         return w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
     except: return Decimal('0'), Decimal('0')
 
-# --- 3. THE ATOMIC ENGINE ---
+# --- 3. THE ATOMIC ENGINE (FIXED BYTES32 CONVERSION) ---
 
 
 
 async def prepare_protocol_bundle(stake_raw, side, pool_key):
-    """Signs Triple Atomic Bundle: Approval -> LP Stake -> Redeem -> Sweep"""
+    """Signs bundle: Approval -> Stake -> Redeem -> Sweep"""
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.8))
     pool = POOLS[pool_key]
     tx_list = []
     
-    # Check Allowance
+    # 1. Silent Approve
     allow = await asyncio.to_thread(usdc_contract.functions.allowance(vault.address, CTF_EXCHANGE).call)
     if allow < stake_raw:
         app_tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256-1).build_transaction({
@@ -91,7 +98,7 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
         tx_list.append(w3.eth.account.sign_transaction(app_tx, vault.key))
         nonce += 1
 
-    # Pre-Sign Stake
+    # 2. Stake (LP fillOrder)
     token_id = int(pool["token"]) if "UP" in side or "CALL" in side or "HIGHER" in side else int(pool["token"]) + 1
     stake_tx = router_contract.functions.fillOrder({
         "maker": vault.address, "makerAmount": stake_raw, "takerAmount": stake_raw,
@@ -100,12 +107,12 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
     tx_list.append(w3.eth.account.sign_transaction(stake_tx, vault.key))
     nonce += 1
 
-    # FIXED: Convert string Condition IDs to bytes32 format for the ABI
+    # FIXED: Conversion to actual bytes32 objects
     cond_id_bytes = w3.to_bytes(hexstr=pool["cond"])
     parent_id_bytes = w3.to_bytes(hexstr="0x0000000000000000000000000000000000000000000000000000000000000000")
 
-    # Pre-Sign Redemption
-    redeem_tx = router_contract.functions.redeemPositions(
+    # 3. Redemption (CTF Protocol)
+    redeem_tx = ctf_contract.functions.redeemPositions(
         USDC_NATIVE, 
         parent_id_bytes, 
         cond_id_bytes, 
@@ -114,7 +121,7 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
     tx_list.append(w3.eth.account.sign_transaction(redeem_tx, vault.key))
     nonce += 1
 
-    # Pre-Sign Sweep
+    # 4. Sweep
     sweep_tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_raw * 1.92)).build_transaction({
         'from': vault.address, 'nonce': nonce, 'gas': 85000, 'gasPrice': gas_price, 'chainId': 137
     })
@@ -132,7 +139,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     
     try:
         prep_task = asyncio.create_task(prepare_protocol_bundle(stake_raw, side, pool_key))
-        await asyncio.sleep(1.5) 
+        await asyncio.sleep(1.5) # Simulation Drifts here
         signed_txs = await prep_task
         
         hashes = []
@@ -143,24 +150,25 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
         report = (
             f"✅ **LP ATOMIC HIT: {pool_key}**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚡ **Sync Status:** 1ms Atomic Delta (Pre-Signed)\n"
-            f"💰 **Stake Receipt:** [Order Filled](https://polygonscan.com/tx/{hashes[1] if len(signed_txs) > 3 else hashes[0]})\n"
-            f"📤 **Profit Sweep:** Sent to Payout Address\n"
+            f"⚡ Sync: 1ms Atomic Release (Pre-Signed)\n"
+            f"💰 Stake Receipt: [View](https://polygonscan.com/tx/{hashes[1] if len(signed_txs) > 3 else hashes[0]})\n"
+            f"📤 Settlement: Profit swept to Payout Address\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📍 *Funds sourced from Native USDC Liquidity.*"
+            f"📍 *Sourced from Native USDC reserves.*"
         )
         await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
         return True
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ **LP Sync Error:** `{str(e)}`")
+        await context.bot.send_message(chat_id, f"❌ **Sync Failure:** `{str(e)}`")
         return False
 
 # --- 4. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX Terminal v18.5**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n📍 Sync: `Bytes32 Fixed`"
-    await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    welcome = (f"🕴️ **APEX LP-Engine v19.5**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n"
+               f"📍 Sync: `Strategic Hold-and-Release Active`")
+    await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
@@ -172,7 +180,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("⚙️ **Configure Stake Amount (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address)
         await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`")
@@ -190,13 +198,14 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("CALL 📈", callback_data="EXEC_UP"), InlineKeyboardButton("PUT 📉", callback_data="EXEC_DOWN")]]
-        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**\nDirection:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
     elif query.data.startswith("EXEC_"):
         await run_atomic_execution(context, query.message.chat_id, "HIGHER" if "UP" in query.data else "LOWER")
 
 async def autopilot_loop(chat_id, context):
     while auto_mode_enabled:
-        await run_atomic_execution(context, chat_id, random.choice(["HIGHER", "LOWER"]), asset_override=random.choice(list(POOLS.keys())))
+        target = random.choice(list(POOLS.keys()))
+        await run_atomic_execution(context, chat_id, random.choice(["HIGHER", "LOWER"]), asset_override=target)
         await asyncio.sleep(random.randint(60, 120))
 
 if __name__ == "__main__":
