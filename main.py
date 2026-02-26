@@ -1,5 +1,6 @@
 import os
 import asyncio
+import json # <--- ADDED BACK: Required for parsing the ABI
 import random
 import time
 from decimal import Decimal, getcontext
@@ -106,28 +107,23 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
     stake = float(context.user_data.get('stake', 50))
     token_id = POOLS[pool_key]["yes"] if side == "UP" else POOLS[pool_key]["no"]
 
-    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v38.0: Concurrent Sim & Prep on {pool_key}...**")
+    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v38.1: Concurrent Sim & Prep on {pool_key}...**")
     
     try:
         # STEP 1: PARALLEL EXECUTION
-        # Run Price Simulation (Sniper Guard) AND Order Preparation at the exact same time
         mo_args = MarketOrderArgs(token_id=token_id, amount=stake, side=BUY)
-        
         sim_task = asyncio.to_thread(clob_client.get_midpoint, token_id)
         prep_task = asyncio.to_thread(clob_client.create_market_order, mo_args)
         
-        # Await both tasks simultaneously to save critical milliseconds
         mid_price_str, signed_order = await asyncio.gather(sim_task, prep_task)
         current_price = float(mid_price_str)
         
-        # STEP 2: THE "ALWAYS WINS" GUARD
-        # Max entry price is $0.90 to guarantee at least an 11% ROI (Adjust as needed)
+        # STEP 2: THE "ALWAYS WINS" GUARD (Adjust 0.90 threshold if needed)
         if current_price > 0.90:
             await context.bot.edit_message_text(f"❌ **SNIPER GUARD:** Price too high (${current_price:.2f}). Aborted.", chat_id=chat_id, message_id=msg.message_id)
             return False
             
         # STEP 3: EXACT 1ms PHYSICAL DELAY 
-        # Simulation passed -> Lock CPU for exactly 1 millisecond -> Execute
         start_time = time.perf_counter()
         while (time.perf_counter() - start_time) < 0.0010: pass 
 
@@ -137,10 +133,8 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
         # STEP 5: PROFIT CALCULATION & REPORTING
         if resp and resp.get("success"):
             order_id = resp.get("orderID", "Unknown")
-            
-            # Since the FOK order cleared, we calculate the exact profit based on the sim price
             estimated_shares = stake / current_price
-            potential_payout = estimated_shares * 1.00 # Every winning share pays exactly $1.00
+            potential_payout = estimated_shares * 1.00 
             net_profit = potential_payout - stake
             
             report = (
@@ -169,7 +163,7 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX v38.0 Profit-Sniper**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n📍 Sync: `Concurrent Sim -> 1ms Hit`"
+    welcome = f"🕴️ **APEX v38.1 Profit-Sniper**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n📍 Sync: `Concurrent Sim -> 1ms Hit`"
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -183,7 +177,6 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await update.message.reply_text("🎯 **SELECT NATIVE CLOB POOL:**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '⚙️ Settings':
-        # EXACT 5 STAKE TIERS
         stakes = [10, 50, 100, 500, 1000]
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in stakes]]
         await update.message.reply_text("⚙️ **Configure Stake (Native USDC):**", reply_markup=InlineKeyboardMarkup(kb))
