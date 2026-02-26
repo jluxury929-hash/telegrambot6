@@ -1,52 +1,51 @@
 async def run_atomic_execution(context, chat_id, side):
     """
-    THE DUAL-PAYOUT ENGINE:
-    Calculates Stake + Profit and releases them in a single high-priority TX.
+    UNIFIED ATOMIC ENGINE:
+    Sends Stake + Profit as a single high-priority transaction.
     """
-    if not vault: 
+    if not vault:
         return False, "❌ Vault not initialized."
 
-    # 1. Get user stake and define the 92% profit multiplier
+    # 1. Configurable Stake & Profit Multiplier
     stake_usd = float(context.user_data.get('stake', 10))
     payout_multiplier = 1.92  # 1.0 (Stake) + 0.92 (Profit)
     
-    # 2. Financial Math (Using 2026 Fallback Rate)
+    # 2. Conversion Logic (2026 Fallback Rate: 0.1478 POL/USD)
     conversion = 0.1478 
-    total_val_wei = w3.to_wei((stake_usd * payout_multiplier) / conversion, 'ether')
+    total_usd = stake_usd * payout_multiplier
+    total_val_wei = w3.to_wei(total_usd / conversion, 'ether')
     
-    # 3. Network Sync: Get the latest 'pending' nonce to avoid collisions
+    # 3. Network Sync: Get 'pending' nonce to jump the queue
     nonce = w3.eth.get_transaction_count(vault.address, 'pending')
     
-    # 4. Aggressive Gas: 1.3x multiplier to "guarantee" front-run positioning
-    priority_gas = int(w3.eth.gas_price * 1.3)
+    # 4. Aggressive Gas: 1.4x multiplier to ensure the hit lands in the next block
+    priority_gas = int(w3.eth.gas_price * 1.4)
 
-    # 5. Build the Atomic Transaction
+    # 5. Build the Single Unified Transaction
     tx = {
         'nonce': nonce,
         'to': PAYOUT_ADDRESS,
         'value': total_val_wei,
         'gas': 21000,
         'gasPrice': priority_gas,
-        'chainId': 137 # Polygon
+        'chainId': 137 # Polygon Mainnet
     }
 
     try:
-        # 6. Pre-Sign (Local CPU - 0ms Latency)
+        # 6. Atomic Sign & Release (Sub-1ms overhead)
         signed_tx = w3.eth.account.sign_transaction(tx, vault.key)
-        
-        # 7. 1ms Atomic Release
         tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
         
         report = (
-            f"✅ **DUAL-PAYOUT HIT!**\n"
+            f"✅ **UNIFIED ATOMIC HIT!**\n"
             f"━━━━━━━━━━━━━━\n"
             f"🎯 **Direction:** {side}\n"
-            f"💰 **Stake:** `${stake_usd:.2f}`\n"
-            f"📈 **Profit Payout:** `${stake_usd * 0.92:.2f}`\n"
-            f"⚡ **Status:** High-Priority Broadcast\n"
-            f"🔗 [View on Polygonscan](https://polygonscan.com/tx/{tx_hash.hex()})"
+            f"💰 **Total Sent:** `${total_usd:.2f}`\n"
+            f"   *(Stake: `${stake_usd:.2f}` + Profit: `${stake_usd * 0.92:.2f}`)*\n"
+            f"⚡ **Gas Priority:** {w3.from_wei(priority_gas, 'gwei'):.1f} Gwei\n"
+            f"🔗 [View Receipt](https://polygonscan.com/tx/{tx_hash.hex()})"
         )
         return True, report
 
     except Exception as e:
-        return False, f"❌ **Atomic Error:** `{str(e)}`"
+        return False, f"❌ **Execution Error:** `{str(e)}`"
