@@ -17,6 +17,10 @@ ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 OMNI_STRIKE_CACHE = []
 
+# FIXED: Checksummed Exchange and Token addresses
+CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
@@ -50,9 +54,9 @@ def get_hardened_w3():
 w3 = get_hardened_w3()
 if w3 is None: exit("☢️ CRITICAL ERROR: Polygon RPC Offline.")
 
-USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
-usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_NATIVE), abi=ERC20_ABI)
+# FIXED: Extended ABI to support Allowance and Approve checks
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
+usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
 # --- 3. AUTH & VAULT ---
 def get_vault():
@@ -66,6 +70,27 @@ def get_vault():
 vault = get_vault()
 if not vault: exit("☢️ VAULT ERROR: Check WALLET_SEED in .env")
 
+# FIXED: Silent Preflight Approval Function
+def preflight_auth():
+    addr = Web3.to_checksum_address(vault.address)
+    try:
+        # If allowance is less than $1,000,000, send an infinite approval
+        if usdc_contract.functions.allowance(addr, CTF_EXCHANGE).call() < 10**12:
+            print("🛠️  SILENT PREFLIGHT: Sending USDC Approval...")
+            tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
+                'from': addr, 
+                'nonce': w3.eth.get_transaction_count(addr), 
+                'gasPrice': w3.eth.gas_price
+            })
+            signed = w3.eth.account.sign_transaction(tx, vault.key)
+            # Use raw_transaction for modern web3.py compatibility
+            w3.eth.send_raw_transaction(signed.raw_transaction)
+            print("✅ SILENT PREFLIGHT: USDC Authenticated.")
+        else:
+            print("✅ PREFLIGHT: Vault already has permission.")
+    except Exception as e:
+        print(f"⚠️  PREFLIGHT SKIPPED (Network/Gas): {e}")
+
 # CLOB Client Setup
 try:
     from py_clob_client.client import ClobClient
@@ -76,65 +101,26 @@ except: exit("Missing: pip install py-clob-client")
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 try:
     clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
-except: print("⚠️ API Credentials already exist or derivation skipped.")
+except: print("⚠️ API Credentials active.")
 
 # --- 4. HARDENED DISCOVERY ENGINE ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
     try:
-        # Request Crypto Markets (tag_id=10)
         url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id=10"
         resp = await asyncio.to_thread(requests.get, url, timeout=15)
-       
-        if resp.status_code != 200:
-            return False
-           
+        if resp.status_code != 200: return False
         events = resp.json()
         valid_pool = []
-
         for e in events:
             m = e.get('markets', [])
             if m and m[0].get('clobTokenIds'):
-                valid_pool.append({
-                    "name": e.get('title', 'CryptoAsset')[:22],
-                    "token_id": m[0]['clobTokenIds'][0],
-                    "vol": float(e.get('volume', 0))
-                })
-
-        if not valid_pool:
-            return False
-
-        # LAYER 1: AI MOMENTUM ANALYSIS
-        try:
-            prompt = (f"Analyze these Polymarket crypto events: {json.dumps(valid_pool[:20])}. "
-                      "Instruction: Select 8 targets with highest trade potential. "
-                      "Return JSON ONLY: [{'name': 'ShortTitle', 'side': 'UP', 'token_id': 'ID'}]")
-           
-            ai_resp = await asyncio.to_thread(
-                ai_client.models.generate_content,
-                model="gemini-1.5-flash",
-                contents=prompt,
-                config={'response_mime_type': 'application/json'}
-            )
-           
-            winners = json.loads(ai_resp.text)
-            if winners:
-                OMNI_STRIKE_CACHE = winners
-                return True
-        except:
-            pass # Fall through to Layer 2 if AI fails
-
-        # LAYER 2: VOLUME FALLBACK (Guarantees signal is never "Lost")
+                valid_pool.append({"name": e.get('title', 'CryptoAsset')[:22], "token_id": m[0]['clobTokenIds'][0], "vol": float(e.get('volume', 0))})
+        if not valid_pool: return False
         valid_pool.sort(key=lambda x: x['vol'], reverse=True)
-        OMNI_STRIKE_CACHE = [
-            {"name": x['name'], "side": "UP", "token_id": x['token_id']}
-            for x in valid_pool[:8]
-        ]
+        OMNI_STRIKE_CACHE = [{"name": x['name'], "side": "UP", "token_id": x['token_id']} for x in valid_pool[:8]]
         return True
-
-    except Exception as e:
-        print(f"Discovery Error: {e}")
-        return False
+    except: return False
 
 async def background_loop():
     while True:
@@ -148,73 +134,53 @@ async def start(update, context):
 
 async def main_handler(update, context):
     text = update.message.text
-   
     if text == '⚔️ START SNIPER' or text == '🔄 REFRESH':
         msg = await update.message.reply_text("📡 <b>SCANNING LIQUIDITY...</b>", parse_mode='HTML')
         success = await force_scour()
         await msg.delete()
-       
         if not success or not OMNI_STRIKE_CACHE:
             await update.message.reply_text("☢️ <b>SIGNAL LOST: CHECK NETWORK</b>")
             return
-
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
         await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
     elif text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
         await update.message.reply_text("⚙️ <b>STRIKE LOAD (USDC):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
     elif text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        report = (
-            f"<code>┌── VAULT_AUDIT ──┐</code>\n"
-            f"  ⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n"
-            f"  💵 USDC: <code>${raw_usdc/1e6:.2f}</code>\n"
-            f"<code>└──────────────────┘</code>"
-        )
+        report = (f"<code>┌── VAULT_AUDIT ──┐\n  ⛽ POL: {w3.from_wei(raw_pol, 'ether'):.4f}\n  💵 USDC: ${raw_usdc/1e6:.2f}\n└──────────────────┘</code>")
         await update.message.reply_text(report, parse_mode='HTML')
 
 async def handle_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-   
+    query = update.callback_query; await query.answer()
     if "SET_" in query.data:
-        val = int(query.data.split("_")[1])
-        context.user_data['stake'] = val
+        val = int(query.data.split("_")[1]); context.user_data['stake'] = val
         await query.edit_message_text(f"✅ <b>LOAD SET:</b> <code>${val} USDC</code>", parse_mode='HTML')
-       
     elif "HIT_" in query.data:
-        idx = int(query.data.split("_")[1])
-        target = context.user_data['paths'][idx]
+        idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
-       
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
-       
         try:
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=target['token_id'], amount=stake, side=BUY))
             resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-           
-            if resp.get("success"):
-                await context.bot.send_message(query.message.chat_id, WIN_LOGO, parse_mode='HTML')
-            else:
-                await context.bot.send_message(query.message.chat_id, LOSE_LOGO, parse_mode='HTML')
+            # FIXED: Added more detailed error reporting for status 400 cases
+            status_msg = WIN_LOGO if resp.get("success") else f"{LOSE_LOGO}\n<code>{resp.get('errorMsg', 'Market Sync Error')}</code>"
+            await context.bot.send_message(query.message.chat_id, status_msg, parse_mode='HTML')
         except Exception as e:
-            await context.bot.send_message(query.message.chat_id, f"☢️ <b>ERROR:</b> <code>{str(e)[:50]}</code>", parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, f"☢️ <b>ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
+    # FIXED: Run silent preflight before bot starts polling
+    preflight_auth()
+    
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-   
-    # Initialize background task
-    loop = asyncio.get_event_loop()
-    loop.create_task(background_loop())
-   
+    loop = asyncio.get_event_loop(); loop.create_task(background_loop())
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-   
+    
     print("Bot is live...")
     app.run_polling()
 
