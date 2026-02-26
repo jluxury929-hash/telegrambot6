@@ -85,19 +85,19 @@ async def fetch_balances(address):
 
 
 async def prepare_protocol_bundle(stake_raw, side, pool_key):
-    """Signs Triple Atomic Bundle with Nonce-Locking and 2% Slippage Padding."""
+    """Signs Triple Atomic Bundle with Nonce-Locking and 2.5% Slippage Padding."""
     nonce = await asyncio.to_thread(active_w3.eth.get_transaction_count, vault.address, 'pending')
     
-    # AGGRESSIVE GAS STRATEGY (2026 Bulletproof)
+    # Force highest priority gas to skip the queue
     latest_block = await asyncio.to_thread(active_w3.eth.get_block, 'latest')
     base_fee = latest_block['baseFeePerGas']
-    max_priority = active_w3.to_wei(85, 'gwei') 
+    max_priority = active_w3.to_wei(95, 'gwei') 
     max_fee = int((base_fee * 2.5) + max_priority)
     
     pool = POOLS[pool_key]
     tx_list = []
     
-    # 1. Approval (Bulletproof allowance check)
+    # 1. Approval
     app_tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256-1).build_transaction({
         'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee, 
         'maxPriorityFeePerGas': max_priority, 'gas': 100000, 'chainId': 137, 'type': 2
@@ -105,29 +105,29 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
     tx_list.append(active_w3.eth.account.sign_transaction(app_tx, vault.key))
     nonce += 1
 
-    # 2. Bulletproof Stake (MakerAssetId: 1 for Native USDC | Slippage: 2%)
+    # 2. Bulletproof Stake (MakerAssetId: 1 for Native USDC | Slippage: 2.5%)
     token_id = int(pool["token"]) if "UP" in side or "CALL" in side or "HIGHER" in side else int(pool["token"]) + 1
     stake_tx = router_contract.functions.fillOrder({
         "maker": vault.address, 
         "makerAmount": stake_raw, 
-        "takerAmount": int(stake_raw * 0.98), # FAIL-SAFE SLIPPAGE
+        "takerAmount": int(stake_raw * 0.975), # FAIL-SAFE SLIPPAGE
         "makerAssetId": 1, # FIXED: 1 is Collateral in Native CTF Router
         "takerAssetId": token_id
     }).build_transaction({
         'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 800000, 'chainId': 137, 'type': 2
+        'maxPriorityFeePerGas': max_priority, 'gas': 850000, 'chainId': 137, 'type': 2
     })
     tx_list.append(active_w3.eth.account.sign_transaction(stake_tx, vault.key))
     nonce += 1
 
     # 3. Secure Redemption (FIXED: Bytes32 Conversion)
     cond_id_bytes = active_w3.to_bytes(hexstr=pool["cond"])
-    parent_id_bytes = active_w3.to_bytes(hexstr="0x0000000000000000000000000000000000000000000000000000000000000000")
+    parent_id_bytes = active_w3.to_bytes(hexstr="0x" + "0"*64)
     redeem_tx = ctf_contract.functions.redeemPositions(
         USDC_NATIVE, parent_id_bytes, cond_id_bytes, [1, 2]
     ).build_transaction({
         'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 400000, 'chainId': 137, 'type': 2
+        'maxPriorityFeePerGas': max_priority, 'gas': 450000, 'chainId': 137, 'type': 2
     })
     tx_list.append(active_w3.eth.account.sign_transaction(redeem_tx, vault.key))
 
@@ -138,7 +138,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     pool_key = asset_override or context.user_data.get('pair', 'BTC')
     stake_raw = int(Decimal(str(context.user_data.get('stake', 50))) / Decimal('1.36') * 10**6) 
 
-    msg = await context.bot.send_message(chat_id, f"🚀 **Initiating 1.5ms Bulletproof Hit on {pool_key}...**")
+    msg = await context.bot.send_message(chat_id, f"🛰️ **Initiating 1.5ms Bulletproof Hit on {pool_key}...**")
     
     try:
         # Pre-sign the bulletproof bundle
@@ -152,16 +152,16 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
         
         hashes = []
         for tx in signed_txs:
-            # Atomic direct broadcast of hex binary
+            # Atomic direct broadcast
             h = await asyncio.to_thread(active_w3.eth.send_raw_transaction, tx.raw_transaction)
             hashes.append(h.hex())
         
         report = (
-            f"✅ **ULTRA-HIT CONFIRMED**\n"
+            f"🎯 **FORCE-HIT CONFIRMED: {pool_key}**\n"
             f"━━━━━━━━━━━━━━\n"
             f"⚡ Offset: 1.5ms (Locked)\n"
-            f"🛡️ Slippage: 2% Fail-Safe Applied\n"
-            f"💰 TX: [View Stake](https://polygonscan.com/tx/{hashes[1] if len(hashes)>1 else hashes[0]})\n"
+            f"🛡️ Slippage: 2.5% Fail-Safe Applied\n"
+            f"💰 Stake Receipt: [View](https://polygonscan.com/tx/{hashes[1] if len(hashes)>1 else hashes[0]})\n"
             f"━━━━━━━━━━━━━━\n"
             f"📍 *By-passed OS latency via CPU-Locked Timer.*"
         )
@@ -175,7 +175,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX v27.0 Bulletproof**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`"
+    welcome = f"🕴️ **APEX v27.5 Bulletproof**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`"
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
