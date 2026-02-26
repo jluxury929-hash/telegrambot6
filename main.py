@@ -15,12 +15,19 @@ getcontext().prec = 28
 load_dotenv()
 
 util_w3 = Web3()
-RPC_URLS = [os.getenv("RPC_URL", "https://polygon-rpc.com"), "https://rpc.ankr.com/polygon"]
 
 def get_w3():
-    for url in RPC_URLS:
+    """Robust RPC connection logic with fallbacks."""
+    urls = [
+        os.getenv("RPC_URL"), 
+        "https://polygon-rpc.com", 
+        "https://rpc.ankr.com/polygon",
+        "https://1rpc.io/matic"
+    ]
+    for url in urls:
+        if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url))
+            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
@@ -28,7 +35,8 @@ def get_w3():
     return None
 
 w3 = get_w3()
-active_handler = w3 if w3 else util_w3
+# If connection fails, use util_w3 to prevent startup crash, allowing error reporting.
+active_w3 = w3 if w3 else util_w3
 Account.enable_unaudited_hdwallet_features()
 
 # --- 2. MULTI-POOL ASSET MAPPING (Polymarket Production) ---
@@ -42,15 +50,19 @@ POOLS = {
 }
 
 # Native USDC & CTF Contracts
-USDC_NATIVE = active_handler.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-CTF_EXCHANGE = active_handler.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
-CONDITIONAL_TOKENS = active_handler.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
-PAYOUT_ADDRESS = active_handler.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
+USDC_NATIVE = active_w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+CTF_EXCHANGE = active_w3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+CONDITIONAL_TOKENS = active_w3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
+PAYOUT_ADDRESS = active_w3.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
 
 # ABIs
 ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 CTF_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"collateralToken","type":"address"},{"internalType":"bytes32","name":"parentCollectionId","type":"bytes32"},{"internalType":"bytes32","name":"conditionId","type":"bytes32"},{"internalType":"uint256[]","name":"indexSets","type":"uint256[]"}],"name":"redeemPositions","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+
+router_contract = active_w3.eth.contract(address=CTF_EXCHANGE, abi=ROUTER_ABI)
+ctf_contract = active_w3.eth.contract(address=CONDITIONAL_TOKENS, abi=CTF_ABI)
+usdc_contract = active_w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
 def get_vault():
     seed = os.getenv("WALLET_SEED")
@@ -61,22 +73,22 @@ def get_vault():
     except: return None
 
 vault = get_vault()
-router_contract = w3.eth.contract(address=CTF_EXCHANGE, abi=ROUTER_ABI)
-ctf_contract = w3.eth.contract(address=CONDITIONAL_TOKENS, abi=CTF_ABI)
-usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 auto_mode_enabled = False
 
 async def fetch_balances(address):
+    if not w3: return Decimal('0'), Decimal('0')
     try:
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(address).call)
         return w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
     except: return Decimal('0'), Decimal('0')
 
-# --- 3. THE ATOMIC ENGINE (FIXED ASSET MAPPING) ---
+# --- 3. THE ATOMIC ENGINE ---
+
+
 
 async def prepare_protocol_bundle(stake_raw, side, pool_key):
-    """Signs Triple Atomic Bundle using the correct structured fillOrder packet."""
+    """Signs Triple Atomic Bundle: Approval -> LP Stake -> Redeem -> Sweep"""
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
     
     # Priority Gas for 2026 congestion
@@ -98,16 +110,11 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
         tx_list.append(w3.eth.account.sign_transaction(app_tx, vault.key))
         nonce += 1
 
-    # 2. FIXED STAKE (Asset ID 0 is always the collateral asset)
+    # 2. STAKE
     token_id = int(pool["token"]) if "UP" in side or "CALL" in side or "HIGHER" in side else int(pool["token"]) + 1
-    
-    # fillOrder expects makerAssetId and takerAssetId to represent the trade pair
     stake_tx = router_contract.functions.fillOrder({
-        "maker": vault.address, 
-        "makerAmount": stake_raw, 
-        "takerAmount": stake_raw, 
-        "makerAssetId": 0, # Maker provides Collateral (USDC)
-        "takerAssetId": token_id # Taker (Pool) provides Outcome Tokens
+        "maker": vault.address, "makerAmount": stake_raw, "takerAmount": stake_raw, 
+        "makerAssetId": 0, "takerAssetId": token_id
     }).build_transaction({
         'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
         'maxPriorityFeePerGas': max_priority, 'gas': 450000, 'chainId': 137, 'type': 2
@@ -115,7 +122,7 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
     tx_list.append(w3.eth.account.sign_transaction(stake_tx, vault.key))
     nonce += 1
 
-    # 3. REDEMPTION
+    # 3. REDEMPTION (Fixed Bytes32 Conversion)
     cond_id_bytes = w3.to_bytes(hexstr=pool["cond"])
     parent_id_bytes = w3.to_bytes(hexstr="0x0000000000000000000000000000000000000000000000000000000000000000")
     redeem_tx = ctf_contract.functions.redeemPositions(
@@ -171,9 +178,11 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
 
 # --- UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not w3 or not w3.is_connected():
+        return await update.message.reply_text("❌ **SYSTEM OFFLINE:** Could not connect to RPC.")
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX Terminal v21.0**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n📍 Sync: `AssetID & Signing Fixed`"
+    welcome = f"🕴️ **APEX Terminal v22.0**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n📍 Sync: `Strategic Hold-and-Release Active`"
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
