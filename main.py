@@ -96,14 +96,14 @@ async def force_scour():
         events = resp.json()
         valid_pool = []
         for e in events:
-            # FIXED: Hardened Token ID extraction logic
+            # FIX: Dig into the markets array to find the clobTokenIds
             m = e.get('markets', [])
             if m and m[0].get('clobTokenIds'):
                 token_ids = m[0].get('clobTokenIds')
                 if token_ids and len(token_ids) > 0:
                     valid_pool.append({
                         "name": e.get('title', 'CryptoAsset')[:22], 
-                        "token_id": str(token_ids[0]), # Ensure it is the 78-digit ID string
+                        "token_id": str(token_ids[0]), # Grab the first CLOB Token ID (YES/UP)
                         "vol": float(e.get('volume', 0))
                     })
         if not valid_pool: return False
@@ -125,7 +125,7 @@ async def start(update, context):
 async def main_handler(update, context):
     text = update.message.text
     if text in ['⚔️ START SNIPER', '🔄 REFRESH']:
-        msg = await update.message.reply_text("📡 <b>SCANNING...</b>", parse_mode='HTML')
+        msg = await update.message.reply_text("📡 <b>SCANNING LIQUIDITY...</b>", parse_mode='HTML')
         success = await force_scour()
         await msg.delete()
         if not success or not OMNI_STRIKE_CACHE:
@@ -153,10 +153,10 @@ async def handle_callback(update, context):
         stake = float(context.user_data.get('stake', 10))
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
         try:
-            # FIXED: Ensures token_id is handled as a strictly formatted string
+            # Place Order with the strictly formatted Token ID numeric string
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=target['token_id'], amount=stake, side=BUY))
             resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-            status_msg = WIN_LOGO if resp.get("success") else f"{LOSE_LOGO}\n<code>{resp.get('errorMsg', 'Invalid ID or Balance')}</code>"
+            status_msg = WIN_LOGO if resp.get("success") else f"{LOSE_LOGO}\n<code>{resp.get('errorMsg', 'Try Smaller Load')}</code>"
             await context.bot.send_message(query.message.chat_id, status_msg, parse_mode='HTML')
         except Exception as e:
             await context.bot.send_message(query.message.chat_id, f"☢️ <b>ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
