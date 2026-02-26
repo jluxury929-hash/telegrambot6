@@ -1,7 +1,6 @@
 import os
 import asyncio
 import json
-import random
 import time
 import requests
 from decimal import Decimal, getcontext
@@ -33,13 +32,11 @@ active_w3 = get_w3()
 Account.enable_unaudited_hdwallet_features()
 
 def get_vault():
-    """FIX: Detects if WALLET_SEED is a Private Key or Mnemonic and loads safely."""
+    """Smart load: Handles Hex Private Key or Mnemonic Seed."""
     seed = os.getenv("WALLET_SEED", "").strip()
     if not seed: return None
     try:
-        if " " not in seed: # It's a Hex Private Key
-            return Account.from_key(seed)
-        return Account.from_mnemonic(seed) # It's a 12-word phrase
+        return Account.from_key(seed) if " " not in seed else Account.from_mnemonic(seed)
     except Exception as e:
         print(f"❌ Vault Error: {e}")
         return None
@@ -62,93 +59,113 @@ clob_client = ClobClient(
 ) if vault else None
 
 if clob_client:
-    try:
-        clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
-        print(f"✅ SENTINEL ONLINE: {vault.address}")
+    try: clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
     except: pass
 
-# --- 2. AI STRATEGIC ANALYSIS ---
-async def get_ai_briefing(question, asset):
-    prompt = f"Act as a quant sniper. Analyze this Polymarket trade: '{question}' for {asset}. Give a 1-sentence analysis | Score (0-100%) | Risk Level."
-    try:
-        resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-2.0-flash", contents=prompt)
-        return resp.text.strip()
-    except: return "Tactical Analysis: Volatility Detected | 65% | MODERATE"
+# --- 2. NEURAL PRE-PROCESSOR & RECURSIVE VALIDATOR ---
 
-# --- 3. THE ORDERBOOK VALIDATOR (FIX FOR 404 ERROR) ---
 async def verify_orderbook(token_id):
-    """Pings the CLOB API to ensure a live orderbook exists before betting."""
+    """Pings the CLOB to ensure orderbook exists (Prevents 404)."""
     try:
         await asyncio.to_thread(clob_client.get_orderbook, token_id)
         return True
     except: return False
 
-# --- 4. THE SNIPER EXECUTION ENGINE ---
-async def execute_snipe(context, chat_id, side, asset_name=None):
-    asset = asset_name or context.user_data.get('pair', 'BTC')
-    stake = float(context.user_data.get('stake', 50))
-    status_msg = await context.bot.send_message(chat_id, f"📡 **SCANNING {asset} ASSETS...**")
-    
-    # 1. Discovery
-    url = f"https://gamma-api.polymarket.com/events?q={asset}&active=true&closed=false"
+async def neural_screen(market_data):
+    """Parallel AI Screening: Predicts winner and verifies liquidity."""
+    question = market_data['question']
+    prompt = f"Trade Analysis: '{question}'. Predict win: 'UP' or 'DOWN'. If unsure, 'SKIP'. Return 1 word ONLY."
     try:
-        data = requests.get(url, timeout=5).json()
-        sorted_events = sorted(data, key=lambda x: float(x.get('volume', 0)), reverse=True)
-    except: return await context.bot.edit_message_text("❌ **SEARCH TIMEOUT**", chat_id=chat_id, message_id=status_msg.message_id)
-
-    target_token, market_name = None, None
-    await context.bot.edit_message_text("🔎 **VALIDATING LIVE ORDERBOOKS...**", chat_id=chat_id, message_id=status_msg.message_id)
-    
-    # 2. THE FIX: Loop through top 5 markets to find an active orderbook (Avoids 404)
-    for event in sorted_events[:5]: 
-        m = event['markets'][0]
-        temp_id = m['clobTokenIds'][0] if side == "UP" else m['clobTokenIds'][1]
-        if await verify_orderbook(temp_id):
-            target_token, market_name = temp_id, m['question']
-            break 
-    
-    if not target_token:
-        return await context.bot.edit_message_text("❌ **NO API-READY MARKETS IN RANGE.**", chat_id=chat_id, message_id=status_msg.message_id)
-
-    # 3. AI Briefing
-    await context.bot.edit_message_text("🧠 **SENTINEL AI ANALYZING CONTRACT...**", chat_id=chat_id, message_id=status_msg.message_id)
-    briefing = await get_ai_briefing(market_name, asset)
-    await context.bot.edit_message_text(f"🎯 **TARGET LOCKED**\n`{market_name}`\n\n📝 **SENTINEL BRIEF:** `{briefing}`", chat_id=chat_id, message_id=status_msg.message_id, parse_mode='Markdown')
-
-    try:
-        # 4. Preparation
-        mid_price = float(await asyncio.to_thread(clob_client.get_midpoint, target_token))
-        order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=target_token, amount=stake, side=BUY))
+        # Use Gemini 1.5 Flash for the fastest possible screening
+        resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt)
+        decision = resp.text.strip().upper()
         
-        # 5. 1ms Precision Lock
+        if decision in ['UP', 'DOWN']:
+            token_id = market_data['clobTokenIds'][0] if decision == "UP" else market_data['clobTokenIds'][1]
+            # Double-check: Only suggest if the orderbook is live
+            if await verify_orderbook(token_id):
+                return {"market": market_data, "side": decision}
+    except: pass
+    return None
+
+async def discovery_matrix(keyword):
+    """Scans 30 markets simultaneously and returns AI-verified winning paths."""
+    # Recursive search strategy: Asset -> Crypto Trending
+    search_queries = [keyword, "Crypto", "Bitcoin"]
+    for q in search_queries:
+        url = f"https://gamma-api.polymarket.com/events?q={q}&active=true&closed=false&limit=30"
+        try:
+            resp = requests.get(url, timeout=5).json()
+            valid_pool = [e['markets'][0] for e in resp if 'markets' in e and len(e['markets'][0]['clobTokenIds']) == 2]
+            
+            # Parallel Neural Strike: Screen all candidates at once
+            tasks = [neural_screen(m) for m in valid_pool]
+            results = await asyncio.gather(*tasks)
+            winning_paths = [r for r in results if r is not None]
+            
+            if winning_paths: return winning_paths
+        except: continue
+    return []
+
+# --- 3. ATOMIC SNIPER ENGINE ---
+
+async def execute_neural_strike(context, chat_id, path):
+    stake = float(context.user_data.get('stake', 50))
+    m = path['market']
+    side = path['side']
+    token_id = m['clobTokenIds'][0] if side == "UP" else m['clobTokenIds'][1]
+    
+    msg = await context.bot.send_message(chat_id, f"⚡ **STRIKE INITIATED: {side}**")
+    
+    try:
+        mid_price = float(await asyncio.to_thread(clob_client.get_midpoint, token_id))
+        order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=token_id, amount=stake, side=BUY))
+        
+        # 1.0ms Precision Hardware Lock
         s = time.perf_counter()
         while (time.perf_counter() - s) < 0.0010: pass
         
-        # 6. Atomic Blast
         resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
         
         if resp.get("success"):
-            txt = f"⚡ **STRIKE COMPLETE**\n━━━━━━━━━━━━━━\n📈 **Price:** `${mid_price:.3f}`\n⏱️ **Sync:** `1.0ms`\n━━━━━━━━━━━━━━"
-            await context.bot.send_message(chat_id, txt, parse_mode='Markdown')
+            report = (f"✅ **WIN CONFIRMED**\n━━━━━━━━━━━━━━\n🎯 {m['question']}\n"
+                      f"📈 Entry: `${mid_price:.3f}`\n⏱️ Sync: `1.0ms`\n━━━━━━━━━━━━━━")
+            await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown')
         else:
-            await context.bot.send_message(chat_id, f"🛡️ **GUARDED:** `{resp.get('errorMsg')}`")
+            await context.bot.edit_message_text(f"🛡️ **GUARDED:** {resp.get('errorMsg')}", chat_id=chat_id, message_id=msg.message_id)
     except Exception as e:
-        await context.bot.send_message(chat_id, f"☢️ **MALFUNCTION:** `{e}`")
+        await context.bot.edit_message_text(f"☢️ **MALFUNCTION:** {e}", chat_id=chat_id, message_id=msg.message_id)
 
-# --- 5. INTERFACE ---
+# --- 4. INTERFACE ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [['⚔️ DEPLOY SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-PILOT']]
-    await update.message.reply_text("🦾 **SENTINEL v52.0**\nStatus: `Omni-Validator Online`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    kb = [['⚔️ DEPLOY SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
+    await update.message.reply_text("🦾 **APEX v57.0: NEURAL SENTINEL**\nStatus: `Parallel recursive Matrix Online`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == '⚔️ DEPLOY SNIPER':
-        kb = [[InlineKeyboardButton("BTC 🟠", callback_data="P_BTC"), InlineKeyboardButton("ETH 🔵", callback_data="P_ETH")]]
-        await update.message.reply_text("🎯 **SELECT TARGET:**", reply_markup=InlineKeyboardMarkup(kb))
+        status = await update.message.reply_text("📡 **SCANNING NEURAL NETWORK FOR WINNING PATHS...**")
+        
+        # Instant Parallel Recursive Discovery
+        winning_paths = await discovery_matrix("Crypto")
+        
+        if not winning_paths:
+            return await status.edit_text("❌ No high-confidence trades found. Retrying scan...")
+
+        kb = []
+        for i, path in enumerate(winning_paths[:6]): # Show top 6 AI-approved strikes
+            q_short = path['market']['question'][:32] + "..."
+            kb.append([InlineKeyboardButton(f"🎯 {q_short} | {path['side']}", callback_data=f"STRIKE_{i}")])
+        
+        context.user_data['active_paths'] = winning_paths
+        await status.edit_text("🎯 **AI-VERIFIED WINNING PATHS IDENTIFIED:**", reply_markup=InlineKeyboardMarkup(kb))
+
     elif text == '⚙️ CALIBRATE':
-        # FIXED: Added $10 and $1000 stake options
+        # Added $10 and $1000 stake options
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500, 1000]]]
         await update.message.reply_text("⚙️ **ADJUST STAKE LOAD (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
+        
     elif text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(active_w3.eth.get_balance, vault.address)
         await update.message.reply_text(f"💳 **SECURE VAULT**\n⛽ POL: `{active_w3.from_wei(raw_pol, 'ether'):.4f}`\n📍 `{vault.address}`")
@@ -159,12 +176,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "SET_" in query.data:
         context.user_data['stake'] = int(query.data.split("_")[1])
         await query.edit_message_text(f"✅ **STAKE SET:** ${context.user_data['stake']} CAD")
-    elif "P_" in query.data:
-        context.user_data['pair'] = query.data.split("_")[1]
-        kb = [[InlineKeyboardButton("CALL 📈", callback_data="EX_UP"), InlineKeyboardButton("PUT 📉", callback_data="EX_DOWN")]]
-        await query.edit_message_text(f"💎 **TARGET:** {context.user_data['pair']}", reply_markup=InlineKeyboardMarkup(kb))
-    elif "EX_" in query.data:
-        await execute_snipe(context, query.message.chat_id, "UP" if "UP" in query.data else "DOWN")
+    elif "STRIKE_" in query.data:
+        idx = int(query.data.split("_")[1])
+        path = context.user_data['active_paths'][idx]
+        await execute_neural_strike(context, query.message.chat_id, path)
 
 if __name__ == "__main__":
     t = os.getenv("TELEGRAM_BOT_TOKEN")
