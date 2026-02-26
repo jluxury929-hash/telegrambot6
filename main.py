@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# --- 1. CORE CONFIG & VISUALS ---
+# --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -23,27 +23,40 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v109-HARDENED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v110-NETWORK-FIX</code>
 """
 
-WIN_LOGO = "<code>✅ STRIKE SUCCESSFUL: POSITION LOADED</code>"
-LOSE_LOGO = "<code>❌ STRIKE FAILED: ORDER REJECTED</code>"
-
-# --- 2. HARDENED CONNECTION GUARD ---
+# --- 2. HARDENED NETWORK RECOVERY ---
 def get_hardened_w3():
-    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
+    # Priority list of reliable Polygon RPCs
+    rpc_list = [
+        os.getenv("RPC_URL"),
+        "https://polygon-rpc.com",
+        "https://rpc.ankr.com/polygon",
+        "https://polygon.llamarpc.com",
+        "https://1rpc.io/matic"
+    ]
+    
+    print("📡 Initializing Network Handshake...")
     for url in rpc_list:
-        if not url: continue
+        if not url or len(url) < 10: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url))
+            # Clean URL and set strict timeout
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 8}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                print(f"✅ Linked to Cluster: {url[:25]}...")
                 return _w3
-        except: continue
+        except Exception as e:
+            print(f"⚠️  Node Refused: {url[:20]}...")
+            continue
     return None
 
 w3 = get_hardened_w3()
-if w3 is None: exit("☢️ RPC Offline.")
+if w3 is None:
+    exit("☢️ NETWORK FATAL: All RPC Nodes Offline. Check your Internet or Firewall.")
+
+
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
@@ -63,16 +76,16 @@ def preflight_auth():
     addr = Web3.to_checksum_address(vault.address)
     try:
         if usdc_contract.functions.allowance(addr, CTF_EXCHANGE).call() < 10**12:
-            print("🛠️  SILENT PREFLIGHT: Approving USDC...")
+            print("🛠️  SILENT PREFLIGHT: Authenticating USDC...")
             tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
                 'from': addr, 'nonce': w3.eth.get_transaction_count(addr), 'gasPrice': w3.eth.gas_price
             })
             signed = w3.eth.account.sign_transaction(tx, vault.key)
             w3.eth.send_raw_transaction(signed.raw_transaction)
-            print("✅ SILENT PREFLIGHT: USDC Authenticated.")
-    except Exception as e: print(f"⚠️  PREFLIGHT SKIPPED: {e}")
+            print("✅ VAULT SECURED.")
+    except Exception as e: print(f"⚠️  PREFLIGHT BYPASSED: {e}")
 
-# CLOB Client Setup
+# CLOB Setup
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
@@ -81,46 +94,30 @@ clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex()
 try: clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 except: pass
 
-# --- 4. HARDENED DISCOVERY ENGINE ---
+# --- 4. ENGINE ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
     try:
-        # Request Crypto Markets (tag_id=10)
         url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id=10"
         resp = await asyncio.to_thread(requests.get, url, timeout=15)
         events = resp.json()
         valid_pool = []
-
-        
-
         for e in events:
-            markets = e.get('markets', [])
-            if markets:
-                # CRITICAL FIX: Navigate to the first market and pull the CLOB Token ID
-                # Most CLOB-active crypto markets have exactly two IDs: [YES_TOKEN, NO_TOKEN]
-                token_ids = markets[0].get('clobTokenIds')
-                if token_ids and len(token_ids) > 0:
-                    valid_pool.append({
-                        "name": e.get('title', 'CryptoAsset')[:22],
-                        "token_id": str(token_ids[0]), # Ensure this is the 78-digit numeric string
-                        "vol": float(e.get('volume', 0))
-                    })
-
-        if not valid_pool: return False
+            m = e.get('markets', [])
+            if m and m[0].get('clobTokenIds'):
+                tids = m[0].get('clobTokenIds')
+                valid_pool.append({"name": e.get('title')[:22], "token_id": str(tids[0]), "vol": float(e.get('volume', 0))})
         valid_pool.sort(key=lambda x: x['vol'], reverse=True)
-        # We store the numeric token_id for the direct order book hit
         OMNI_STRIKE_CACHE = [{"name": x['name'], "token_id": x['token_id']} for x in valid_pool[:8]]
         return True
-    except Exception as e:
-        print(f"Scour Error: {e}")
-        return False
+    except: return False
 
 async def background_loop():
     while True:
         await force_scour()
         await asyncio.sleep(120)
 
-# --- 5. INTERFACE & EXECUTION ---
+# --- 5. INTERFACE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
     await update.message.reply_text(f"{LOGO}\n<b>CRYPTO APEX ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
@@ -136,42 +133,29 @@ async def main_handler(update, context):
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("🌌 <b>TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
         await update.message.reply_text("⚙️ <b>LOAD:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        report = f"<code>⛽ POL: {w3.from_wei(raw_pol, 'ether'):.4f}\n💵 USDC: ${raw_usdc/1e6:.2f}</code>"
+        report = f"<code>┌── VAULT_AUDIT ──┐\n  ⛽ POL: {w3.from_wei(raw_pol, 'ether'):.4f}\n  💵 USDC: ${raw_usdc/1e6:.2f}\n└──────────────────┘</code>"
         await update.message.reply_text(report, parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
-    if "SET_" in query.data:
-        val = int(query.data.split("_")[1]); context.user_data['stake'] = val
-        await query.edit_message_text(f"✅ <b>LOAD: ${val} USDC</b>", parse_mode='HTML')
-    elif "HIT_" in query.data:
+    if "HIT_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
         try:
-            # Place order using the properly extracted CLOB Token ID
-            order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
-                token_id=target['token_id'], 
-                amount=stake, 
-                side=BUY
-            ))
+            order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=target['token_id'], amount=stake, side=BUY))
             resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-            
-            if resp.get("success"):
-                await context.bot.send_message(query.message.chat_id, WIN_LOGO, parse_mode='HTML')
-            else:
-                # Capture the exact error from Polymarket to see if it's liquidity or balance
-                err_msg = resp.get('errorMsg') or "Order Rejected (Check USDC/POL Balance)"
-                await context.bot.send_message(query.message.chat_id, f"{LOSE_LOGO}\n<code>{err_msg}</code>", parse_mode='HTML')
+            msg = "✅ SUCCESS" if resp.get("success") else f"❌ FAILED: {resp.get('errorMsg')}"
+            await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
         except Exception as e:
-            await context.bot.send_message(query.message.chat_id, f"☢️ <b>API ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, f"☢️ <b>ERROR:</b> <code>{str(e)[:50]}</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
     preflight_auth()
