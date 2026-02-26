@@ -4,3 +4,4 @@ numpy
 web3
 eth-account
 python-dotenv
+py-clob-client
