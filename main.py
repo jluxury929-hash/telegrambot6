@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# --- 1. CORE CONFIG & EXPANSIVE VISUALS ---
+# --- 1. CORE CONFIG & ASTONISHING VISUALS ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -21,9 +21,9 @@ LOGO = """
   ███████║██████╔╝█████╗   ╚███╔╝ 
   ██╔══██║██╔═══╝ ██╔══╝   ██╔██╗ 
   ██║  ██║██║     ███████╗██╔╝ ██╗
-  ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v110.0
+  ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v111.0
 
-      [ AI-HEALED SINGULARITY ACTIVE ]
+      [ NEURAL SLIPPAGE BUFFER ACTIVE ]
 </code>
 """
 
@@ -40,34 +40,48 @@ WIN_LOGO = """
 </code>
 """
 
-# --- 2. THE AI-HEALED NODE & RECOVERY CORE ---
+LOSE_LOGO = """
+<code>
+          ██╗      ██████╗ ███████╗███████╗
+          ██║     ██╔═══██╗██╔════╝██╔════╝
+          ██║     ██║   ██║███████╗█████╗  
+          ██║     ██║   ██║╚════██║██╔══╝  
+          ███████╗╚██████╔╝███████║███████╗
+          ╚══════╝ ╚═════╝ ╚══════╝╚══════╝
 
-def get_ai_healed_w3():
-    """AI-monitored connection mesh. Rotates until a high-speed link is secured."""
-    rpc_list = [
-        os.getenv("RPC_URL"),
-        "https://polygon-rpc.com",
-        "https://rpc.ankr.com/polygon",
-        "https://1rpc.io/matic",
-        "https://polygon.llamarpc.com"
-    ]
+                 ▄██████████▄
+                ██████████████
+                ██  ██████  ██
+                ██████████████
+                  ██████████
+                  ██  ██  ██
+                  ▀▀  ▀▀  ▀▀
+
+          [🛡️] REVERT: SLIPPAGE GUARD [🛡️]
+</code>
+"""
+
+# --- 2. HARDENED NODE BRIDGE ---
+def get_hardened_w3():
+    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon", "https://1rpc.io/matic"]
     for url in rpc_list:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 15}))
+            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
         except: continue
     return None
 
-w3 = get_ai_healed_w3()
-if w3 is None: exit("FATAL: AI_HEALER_FAILED_TO_SECURE_NODE")
+w3 = get_hardened_w3()
+if w3 is None: exit("CRITICAL_FAILURE: RESTART SYSTEM")
 
 USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_NATIVE), abi=ERC20_ABI)
 
+# --- 3. AUTH & AI DISCOVERY ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -84,83 +98,66 @@ from py_clob_client.order_builder.constants import BUY
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 3. THE AI-HEALING DISCOVERY LOOP ---
-
-async def ai_healed_force_scour():
-    """AI-Monitored Target Discovery: Retries with neural logic until bets are confirmed."""
+async def force_scour():
     global OMNI_STRIKE_CACHE
-    while True:
-        try:
-            # AI Healer triggers a deep scrape to bypass cache issues
-            url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50"
-            resp = await asyncio.to_thread(requests.get, url, timeout=12)
-            data = resp.json()
-            
-            # Filter for strictly tradable assets
-            valid_pool = [{"q": e['markets'][0]['question'], "id": e['markets'][0]['clobTokenIds']} 
-                          for e in data if 'markets' in e and e['markets'][0].get('clobTokenIds')]
-            
-            if not valid_pool:
-                raise ValueError("AI_HEALER: No raw liquidity found.")
+    try:
+        url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50"
+        resp = await asyncio.to_thread(requests.get, url, timeout=10)
+        data = resp.json()
+        valid_pool = [{"q": e['markets'][0]['question'], "id": e['markets'][0]['clobTokenIds']} 
+                      for e in data if 'markets' in e and e['markets'][0].get('clobTokenIds')]
+        
+        prompt = (f"Analyze {json.dumps(valid_pool[:40])}. Select 8 crypto winners. "
+                  "Return JSON ONLY: [{'name': 'ASSET', 'side': 'UP/DOWN', 'q': 'Question', 'token_id': 'ID'}]")
+        
+        ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", 
+                                          contents=prompt, config={'response_mime_type': 'application/json'})
+        winners = json.loads(ai_resp.text)
+        if winners: OMNI_STRIKE_CACHE = winners
+        return True
+    except: return False
 
-            prompt = (f"AI HEALER: Analyze {json.dumps(valid_pool[:40])}. "
-                      "Identify 8 high-conf short-term winners. Return JSON: "
-                      "[{'name': 'ASSET', 'side': 'UP/DOWN', 'q': 'Question', 'token_id': 'ID'}]")
-            
-            ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", 
-                                              contents=prompt, config={'response_mime_type': 'application/json'})
-            winners = json.loads(ai_resp.text)
-            
-            if winners:
-                OMNI_STRIKE_CACHE = winners
-                return True
-        except: 
-            await asyncio.sleep(2) # Neural cooldown before healing retry
-
-async def background_healer_loop():
-    while True:
-        await ai_healed_force_scour()
-        await asyncio.sleep(25)
-
-# --- 4. ARCADE INTERFACE & ATOMIC STRIKE ---
-
+# --- 4. ARCADE INTERFACE & BUFFERED STRIKE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
-    await update.message.reply_text(f"{LOGO}\n<b>AI_HEALER_CORE: ONLINE</b>\n`STABILITY: MAXIMIZED`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>APEX SINGULARITY ONLINE</b>\n`READY_P1`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text == '⚔️ START SNIPER':
-        msg = await update.message.reply_text("📡 <b>HEALER_CORE: PULSING MATRIX...</b>", parse_mode='HTML')
-        
-        # AI-HEALED GUARANTEE: The bot will retry internally until the buffer is filled
-        count = 0
-        while not OMNI_STRIKE_CACHE and count < 3:
-            await ai_healed_force_scour()
-            count += 1
-            
-        await msg.delete()
-        
+        status = await update.message.reply_text("📡 <b>NEURAL_PULSE: SEARCHING...</b>", parse_mode='HTML')
+        if not OMNI_STRIKE_CACHE: await force_scour()
+        await status.delete()
+
         if OMNI_STRIKE_CACHE:
-            kb = [[InlineKeyboardButton(f"🎯 {p['name']} | {p['side']} | AI_VERIFIED", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+            kb = [[InlineKeyboardButton(f"🎯 {p['name']} | {p['side']} | VERIFIED", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
             context.user_data['paths'] = OMNI_STRIKE_CACHE
             await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else:
-            await update.message.reply_text("🛡️ <b>HEALER_NOTICE:</b> Matrix is dry. Wait 5s for neural refresh.")
+            await update.message.reply_text("☢️ <b>MATRIX_REVERT:</b> Try again.")
+
+    elif update.message.text == '⚙️ CALIBRATE':
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500, 1000]]]
+        await update.message.reply_text("⚙️ <b>ADJUST STAKE (CAD):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif update.message.text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        report = f"<code>┌── VAULT_AUDIT ──┐\n  ⛽ POL: {w3.from_wei(raw_pol, 'ether'):.4f}\n  💵 USDC: ${raw_usdc/1e6:.2f}\n└──────────────────┘</code>"
+        report = f"<code>┌── VAULT_AUDIT ──┐</code>\n  ⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n  💵 USDC: <code>${raw_usdc/1e6:.2f}</code>\n<code>└──────────────────┘</code>"
         await update.message.reply_text(report, parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
-    if "HIT_" in query.data:
+    if "SET_" in query.data:
+        val = int(query.data.split("_")[1])
+        context.user_data['stake'] = val
+        await query.edit_message_text(f"✅ <b>STAKE LOADED:</b> <code>${val} CAD</code>", parse_mode='HTML')
+    elif "HIT_" in query.data:
         idx = int(query.data.split("_")[1])
         bet = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 50))
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{bet['name']}</code>", parse_mode='HTML')
         try:
+            # NEURAL BUFFER: Use Market Order with internal slippage to force execution
             order = await asyncio.to_thread(clob_client.create_market_order, 
                 MarketOrderArgs(token_id=bet['token_id'], amount=stake, side=BUY))
             
@@ -168,12 +165,11 @@ async def handle_callback(update, context):
             while (time.perf_counter() - s) < 0.0010: pass 
             
             resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-            await context.bot.send_message(query.message.chat_id, WIN_LOGO if resp.get("success") else "🛡️ <b>REVERTED</b>", parse_mode='HTML')
-        except: await context.bot.send_message(query.message.chat_id, "☢️ <b>AI_HEALER: NODE_SWAP_REQUIRED</b>")
+            await context.bot.send_message(query.message.chat_id, WIN_LOGO if resp.get("success") else LOSE_LOGO, parse_mode='HTML')
+        except: await context.bot.send_message(query.message.chat_id, "☢️ <b>DESYNC_ERROR</b>")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-    loop = asyncio.get_event_loop(); loop.create_task(background_healer_loop())
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
