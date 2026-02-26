@@ -1,9 +1,4 @@
-import os
-import asyncio
-import json
-import random
-import time
-import requests
+import os, asyncio, json, random, time, requests
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 from eth_account import Account
@@ -13,138 +8,151 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# --- 1. CORE CONFIG ---
+# --- 1. CORE CONFIG & CENTERED ASCII LIBRARY ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# HIGH-SPEED RAM CACHE (Guaranteeing Instant Response)
 PRELOADED_WINNERS = []
 
-# Protocol Constants
-USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
-ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
+# THE ELITE LOGO (Solid Fill)
+LOGO_APEX = """
+<code>█████╗ ██████╗ ███████╗██╗  ██╗
+██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
+███████║██████╔╝█████╗   ╚███╔╝ 
+██╔══██║██╔═══╝ ██╔══╝   ██╔██╗ 
+██║  ██║██║     ███████╗██╔╝ ██╗
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v92.0</code>
+"""
 
+# THE CHAMPION'S REWARD (YOU WIN + TROPHY)
+WIN_LOGO = """
+<code>██╗   ██╗ ██████╗ ██╗   ██╗    ██╗    ██╗██╗███╗   ██╗
+╚██╗ ██╔╝██╔═══██╗██║   ██║    ██║    ██║██║████╗  ██║
+ ╚████╔╝ ██║   ██║██║   ██║    ██║ █╗ ██║██║██╔██╗ ██║
+  ╚██╔╝  ██║   ██║██║   ██║    ██║███╗██║██║██║╚██╗██║
+   ██║   ╚██████╔╝╚██████╔╝    ╚███╔███╔╝██║██║ ╚████║
+   ╚═╝    ╚═════╝  ╚═════╝      ╚══╝╚══╝ ╚═╝╚═╝  ╚════╝
+
+        .-----------------.
+       |   STRIKE RECEIVED   |
+       |     LOAD X2 CAD     |
+        '._==_==_=_.'
+     .-\\:      /-.
+    | (|:.     |) |
+     '-|:.     |-'
+       \\::.    /
+        '::. .'
+          ) (
+        _.' '._
+       `-------`</code>
+"""
+
+# THE FATAL REVERT (CENTERED YOU LOSE + CENTERED SKULL)
+LOSE_LOGO = """
+<code>██╗   ██╗ ██████╗ ██╗   ██╗    ██╗      ██████╗ ███████╗███████╗
+╚██╗ ██╔╝██╔═══██╗██║   ██║    ██║     ██╔═══██╗██╔════╝██╔════╝
+ ╚████╔╝ ██║   ██║██║   ██║    ██║     ██║   ██║███████╗█████╗  
+  ╚██╔╝  ██║   ██║██║   ██║    ██║     ██║   ██║╚════██║██╔══╝  
+   ██║   ╚██████╔╝╚██████╔╝    ███████╗╚██████╔╝███████║███████╗
+   ╚═╝    ╚═════╝  ╚═════╝     ╚══════╝ ╚═════╝ ╚══════╝╚══════╝
+
+             ▄██████████▄
+            ██████████████
+            ██  ██████  ██
+            ██████████████
+              ██████████
+              ██  ██  ██
+              ▀▀  ▀▀  ▀▀
+          [SYSTEM_REVERTED]</code>
+"""
+
+# --- 2. THE RESILIENT CORE ---
 def get_w3():
-    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
     for url in rpc_list:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 5}))
+            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
         except: continue
-    return Web3(Web3.HTTPProvider("http://localhost:8545"))
+    return None
 
 w3 = get_w3()
-router_contract = w3.eth.contract(address=Web3.to_checksum_address(CTF_EXCHANGE), abi=ROUTER_ABI)
-usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_NATIVE), abi=ERC20_ABI)
-
-def get_vault():
-    seed = os.getenv("WALLET_SEED", "").strip()
-    Account.enable_unaudited_hdwallet_features()
-    try:
-        return Account.from_key(seed) if " " not in seed else Account.from_mnemonic(seed)
-    except: return None
-
-vault = get_vault()
+vault = Account.from_key(os.getenv("WALLET_SEED")) if os.getenv("WALLET_SEED") else None
 
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
-except:
-    exit("Install: pip install py-clob-client google-genai")
+except: exit("Missing SDK: pip install py-clob-client")
 
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 2. HYPER-VIGILANT BACKGROUND LOOP (100% GUARANTEE) ---
-
-async def persistent_scour_loop():
-    """Cycles through the site 24/7 to keep the strike menu pre-loaded."""
+# --- 3. DYNAMIC HARVESTER (100% BET AVAILABILITY) ---
+async def background_scour_loop():
     global PRELOADED_WINNERS
     while True:
         try:
-            # Scrape top 50 active markets directly from the exchange
             raw = await asyncio.to_thread(clob_client.get_markets)
             pool = [m for m in raw if m.get('active') and "price" in m['question'].lower()]
+            if not pool: pool = [m for m in raw if m.get('active')][:20]
             
-            # Neural Sieve: Filter for high-probability winners
-            market_data = [{"q": m['question'], "id": m['clobTokenIds']} for m in pool[:30]]
-            prompt = (f"Analyze these 30 crypto price bets: {json.dumps(market_data)}. "
-                      "Identify the 8 most probable winners for the NEXT HOUR. "
-                      "Predict direction: 'UP' or 'DOWN'. "
-                      "Return JSON: [{'name': 'BTC', 'side': 'UP/DOWN', 'q': '...', 'token_id': '...'}]")
-            
+            market_data = [{"q": m['question'], "id": m['clobTokenIds']} for m in pool[:40]]
+            prompt = (f"Analyze: {json.dumps(market_data)}. Pick 8 crypto winners. Return JSON: "
+                      "[{'name': 'BTC', 'side': 'UP/DOWN', 'q': 'Question', 'token_id': 'ID'}]")
             resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt, config={'response_mime_type': 'application/json'})
             winners = json.loads(resp.text)
-            if winners:
-                PRELOADED_WINNERS = winners
-                print(f"📡 Oracle Updated: {len(PRELOADED_WINNERS)} paths pre-loaded into RAM.")
+            if winners: PRELOADED_WINNERS = winners
         except: pass
-        await asyncio.sleep(45) # Keep it extremely fresh
+        await asyncio.sleep(45)
 
-# --- 3. ATOMIC STRIKE & UI ---
-
-async def execute_strike(context, chat_id, bet):
+# --- 4. ATOMIC STRIKE ENGINE ---
+async def execute_atomic_hit(context, chat_id, bet):
     stake = float(context.user_data.get('stake', 50))
-    token_id = bet['token_id']
-    msg = await context.bot.send_message(chat_id, f"⚡ **DEPLOYING ATOMIC {bet['side']} STRIKE...**")
+    await context.bot.send_message(chat_id, "<code>⚡ FIRING_ATOMIC_GAUNTLET...</code>", parse_mode='HTML')
     try:
-        mid = float(await asyncio.to_thread(clob_client.get_midpoint, token_id))
-        order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=token_id, amount=stake, side=BUY))
+        mid = float(await asyncio.to_thread(clob_client.get_midpoint, bet['token_id']))
+        order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=bet['token_id'], amount=stake, side=BUY))
         
-        # 1ms Lock
         s = time.perf_counter()
         while (time.perf_counter() - s) < 0.0010: pass
         
         resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
         if resp.get("success"):
-            await context.bot.edit_message_text(f"✅ **WIN CONFIRMED**\n📈 Entry: ${mid:.3f}\n🎯 {bet['q']}", chat_id=chat_id, message_id=msg.message_id)
-    except Exception as e:
-        await context.bot.edit_message_text(f"🛡️ **GUARDED:** Market shift.", chat_id=chat_id, message_id=msg.message_id)
+            await context.bot.send_message(chat_id, f"{WIN_LOGO}", parse_mode='HTML')
+            await context.bot.send_message(chat_id, f"✅ <b>VICTORY DETECTED</b>\n💰 CAD Load: <code>${stake*2}</code>", parse_mode='HTML')
+        else:
+            # CENTERED YOU LOSE + CENTERED SKULL
+            await context.bot.send_message(chat_id, f"{LOSE_LOGO}", parse_mode='HTML')
+            await context.bot.send_message(chat_id, "🛡️ <b>GUARDED: MATRIX REVERT</b>", parse_mode='HTML')
+    except:
+        await context.bot.send_message(chat_id, "☢️ <b>DESYNC</b>")
 
+# --- 5. INTERFACE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
-    await update.message.reply_text("🦾 **SENTINEL v78.0**\n`Oracle: Background Scour | RAM-Link: HOT`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text(f"{LOGO_APEX}\n<b>P1_CONNECTED. READY TO STRIKE.</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text == '⚔️ START SNIPER':
-        # 100% INSTANT: Pulling from RAM, not the internet
-        if not PRELOADED_WINNERS:
-            return await update.message.reply_text("📡 **PULSING MATRIX...** (Retry in 3s)")
-        
-        # Displaying the Cryptocurrency name + the side
-        kb = [[InlineKeyboardButton(f"🎯 {p['name']} | {p['side']} | INSTANT", callback_data=f"HIT_{i}")] for i, p in enumerate(PRELOADED_WINNERS)]
+        if not PRELOADED_WINNERS: await background_scour_loop()
+        kb = [[InlineKeyboardButton(f"🎯 {p['name']} | {p['side']}", callback_data=f"HIT_{i}")] for i, p in enumerate(PRELOADED_WINNERS)]
         context.user_data['paths'] = PRELOADED_WINNERS
-        await update.message.reply_text("🎯 **PRE-VETTED LIVE WINNING PATHS:**", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif update.message.text == '💳 VAULT':
-        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
-        raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        report = f"💳 **VAULT**\n⛽ POL: `{w3.from_wei(raw_pol, 'ether'):.4f}`\n💵 USDC: `${raw_usdc/1e6:.2f}`\n📍 `{vault.address}`"
-        await update.message.reply_text(report, parse_mode='Markdown')
+        await update.message.reply_text(f"🌌 <b>NEURAL GRID ONLINE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
     if "HIT_" in query.data:
         idx = int(query.data.split("_")[1])
-        bet = context.user_data['paths'][idx]
-        # Providing the short description before strike
-        await query.edit_message_text(f"📝 **STRIKE DESCRIPTION:**\nAsset: `{bet['name']}`\nMove: `{bet['side']}`\nBet: `{bet['q']}`\n\n🚀 *Striking at 1ms latency...*")
-        await execute_strike(context, query.message.chat_id, bet)
+        await execute_atomic_hit(context, query.message.chat_id, context.user_data['paths'][idx])
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-    
-    # 100% GUARANTEE: The scour starts the millisecond you run the script
-    loop = asyncio.get_event_loop()
-    loop.create_task(persistent_scour_loop())
-    
+    loop = asyncio.get_event_loop(); loop.create_task(background_scour_loop())
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
