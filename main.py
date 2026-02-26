@@ -75,9 +75,12 @@ except ImportError:
 clob_client = None
 
 if vault:
-    # 💥 THE FIX: Auto-derive everything directly from the Vault
-    derived_private_key = vault.key.hex()  # Forces correct hex format
-    derived_funder = vault.address         # Automatically extracts public address
+    # Auto-derive everything directly from the Vault
+    derived_private_key = vault.key.hex() if isinstance(vault.key, bytes) else vault.key
+    if not derived_private_key.startswith("0x"):
+        derived_private_key = "0x" + derived_private_key
+        
+    derived_funder = vault.address
     
     print(f"🚀 Booting Vault Signature for: {derived_funder}")
     
@@ -89,7 +92,6 @@ if vault:
             signature_type=0, 
             funder=derived_funder
         )
-        # Establish L1 -> L2 credentials automatically
         clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
         print("✅ CLOB API Authenticated Successfully")
     except Exception as e:
@@ -97,47 +99,62 @@ if vault:
 else:
     print("❌ CRITICAL: Could not load Vault. Check WALLET_SEED in .env")
 
-# --- 3. AUTO-FETCH MARKET MAPPING ---
+# --- 3. DYNAMIC MARKET SEARCH MAPPING ---
+# The bot will search Polymarket for the top active market matching these keywords.
 POOLS = {
-    "BTC":   {"slug": "bitcoin-price-above-65000-feb-26", "color": "🟠"},
-    "ETH":   {"slug": "ethereum-price-above-3000-feb-26", "color": "🔵"},
-    "SOL":   {"slug": "solana-price-above-150-feb-26", "color": "🟣"},
-    "MATIC": {"slug": "matic-price-above-1-feb-26", "color": "🔘"},
-    "BVIV":  {"slug": "bviv-daily-volatility-feb-26", "color": "📊"},
-    "EVIV":  {"slug": "eviv-daily-volatility-feb-26", "color": "📈"}
+    "BTC":   {"keyword": "Bitcoin", "price": "🟠"},
+    "ETH":   {"keyword": "Ethereum", "price": "🔵"},
+    "SOL":   {"keyword": "Solana", "price": "🟣"},
+    "MATIC": {"keyword": "Polygon MATIC", "price": "🔘"},
+    "BVIV":  {"keyword": "BVIV", "price": "📊"},
+    "EVIV":  {"keyword": "EVIV", "price": "📈"}
 }
 
-def get_live_token_id(slug, side):
-    """Hits the Polymarket Gamma API to grab the freshest Token ID."""
-    url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+def get_dynamic_token_id(keyword, side):
+    """Searches Polymarket for the top ACTIVE market matching the keyword."""
+    url = f"https://gamma-api.polymarket.com/events?q={keyword}&active=true&closed=false"
+    
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
-        if data and len(data) > 0:
-            markets = data[0].get("markets", [])
-            if markets:
-                clob_ids = markets[0].get("clobTokenIds", [])
-                if len(clob_ids) == 2:
-                    return clob_ids[0] if side == "UP" else clob_ids[1]
+        
+        # Loop through search results to find a valid, open market
+        for event in data:
+            markets = event.get("markets", [])
+            for market in markets:
+                # Ensure market is currently active and accepts orders
+                if market.get("active") and not market.get("closed"):
+                    clob_ids = market.get("clobTokenIds", [])
+                    if len(clob_ids) == 2:
+                        token_id = clob_ids[0] if side == "UP" else clob_ids[1]
+                        market_name = market.get("question", event.get("title", "Unknown Market"))
+                        return token_id, market_name
     except Exception as e:
-        pass
-    return None
+        print(f"Error searching Polymarket API: {e}")
+        
+    return None, None
 
 # --- 4. THE SIMULTANEOUS PROFIT-SNIPER ENGINE ---
+
+
+
 async def run_api_execution(context, chat_id, side, asset_override=None):
     if not clob_client:
         return await context.bot.send_message(chat_id, "❌ Error: CLOB Client offline. Check console logs.")
 
     pool_key = asset_override or context.user_data.get('pair', 'BTC')
     stake = float(context.user_data.get('stake', 50))
-    slug = POOLS[pool_key]["slug"]
+    keyword = POOLS[pool_key]["keyword"]
 
-    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v42.0: Acquiring Target on {pool_key}...**")
+    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v43.0: Searching live markets for '{keyword}'...**")
     
-    token_id = await asyncio.to_thread(get_live_token_id, slug, side)
+    # Auto-Search for the currently active Token ID
+    token_id, market_name = await asyncio.to_thread(get_dynamic_token_id, keyword, side)
     
     if not token_id:
-        return await context.bot.edit_message_text(f"❌ **ERROR:** Invalid Slug for {pool_key}.", chat_id=chat_id, message_id=msg.message_id)
+        return await context.bot.edit_message_text(f"❌ **ERROR:** No active markets found for {pool_key}.", chat_id=chat_id, message_id=msg.message_id)
+
+    await context.bot.edit_message_text(f"🛰️ **APEX v43.0: Target Locked!**\n🎯 `{market_name}`\nConcurrent Sim & Prep Initiated...", chat_id=chat_id, message_id=msg.message_id)
 
     try:
         # STEP 1: PARALLEL EXECUTION
@@ -168,7 +185,8 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
             report = (
                 f"✅ **WINNING HIT CONFIRMED**\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"🎯 Entry Price: `${current_price:.3f}`\n"
+                f"🎯 Target: `{market_name}`\n"
+                f"💲 Entry Price: `${current_price:.3f}`\n"
                 f"📦 Shares Acquired: `{estimated_shares:.2f}`\n"
                 f"💰 **Net Profit (If Won):** `+${net_profit:.2f}`\n"
                 f"━━━━━━━━━━━━━━\n"
@@ -187,22 +205,23 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = (f"🕴️ **APEX v42.0 API-Sniper**\n━━━━━━━━━━━━━━\n"
+    welcome = (f"🕴️ **APEX v43.0 Autonomous Sniper**\n━━━━━━━━━━━━━━\n"
                f"⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n"
-               f"📍 Sync: `Zero-Gas FOK Matching`")
+               f"📍 Sync: `Auto-Search -> Zero-Gas Hit`")
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
     text, chat_id = update.message.text, update.message.chat_id
     if text == '🚀 Start Trading':
-        kb = [[InlineKeyboardButton(f"{k} {POOLS[k]['color']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[:3]],
-              [InlineKeyboardButton(f"{k} {POOLS[k]['color']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[3:]]]
+        # Safely uses the updated 'price' key for the emoji
+        kb = [[InlineKeyboardButton(f"{k} {POOLS[k]['price']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[:3]],
+              [InlineKeyboardButton(f"{k} {POOLS[k]['price']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[3:]]]
         await update.message.reply_text("🎯 **SELECT NATIVE CLOB POOL:**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure Stake Amount (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
         v_addr = vault.address if vault else "No Wallet Found"
@@ -239,14 +258,6 @@ if __name__ == "__main__":
         app.add_handler(CallbackQueryHandler(handle_interaction))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_chat_handler))
         app.run_polling(drop_pending_updates=True)
-
-
-
-
-
-
-
-
 
 
 
