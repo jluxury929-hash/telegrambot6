@@ -18,14 +18,51 @@ OMNI_STRIKE_CACHE = []
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
-███████║██████╔╝█████╗    ╚███╔╝ 
-██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
+███████║██████╔╝█████╗    ╚███╔╝
+██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v105-ULTRA</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v102</code>
 """
 
-WIN_LOGO = "<code>[STRIKE_CONFIRMED_X2]</code>"
-LOSE_LOGO = "<code>[STRIKE_REVERTED]</code>"
+WIN_LOGO = """
+<code>           ██╗   ██╗ ██████╗ ██╗   ██╗
+           ╚██╗ ██╔╝██╔═══██╗██║   ██║
+            ╚████╔╝ ██║   ██║██║   ██║
+             ╚██╔╝  ██║   ██║██║   ██║
+              ██║   ╚██████╔╝╚██████╔╝
+              ╚═╝    ╚═════╝  ╚═════╝
+
+               .-----------------.
+              |   STRIKE RECEIVED   |
+              |      LOAD X2 CAD     |
+               '._==_==_=_.'
+            .-\\:      /-.
+           | (|:.     |) |
+            '-|:.     |-'
+              \\::.    /
+               '::. .'
+                 ) (
+               _.' '._
+              `-------`</code>
+"""
+
+LOSE_LOGO = """
+<code>           ██╗      ██████╗ ███████╗███████╗
+           ██║     ██╔═══██╗██╔════╝██╔════╝
+           ██║     ██║   ██║███████╗█████╗  
+           ██║     ██║   ██║╚════██║██╔══╝  
+           ███████╗╚██████╔╝███████║███████╗
+           ╚══════╝ ╚═════╝ ╚══════╝╚══════╝
+
+                  ▄██████████▄
+                 ██████████████
+                 ██  ██████  ██
+                 ██████████████
+                   ██████████
+                   ██  ██  ██
+                   ▀▀  ▀▀  ▀▀
+               [SYSTEM_REVERTED]</code>
+"""
 
 # --- 2. THE UNBREAKABLE CONNECTION GUARD ---
 def get_hardened_w3():
@@ -73,64 +110,68 @@ except: exit("Install: pip install py-clob-client google-genai requests")
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 4. THE GAP DISCOVERY ENGINE (CRYPTO-SETTLEMENT FOCUS) ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
     try:
-        # tag_id=100381 targets high-precision Crypto Markets
-        url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=40&tag_id=100381&order=volume&ascending=false"
+        # Sort by volume to provide the AI with better data
+        url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&order=volume&ascending=false"
         resp = await asyncio.to_thread(requests.get, url, timeout=10)
-        markets = resp.json()
-        
+        events = resp.json()
+       
         valid_pool = []
-        for m in markets:
-            prices = m.get('outcomePrices', [0, 0])
-            yes_p = float(prices[0]) if prices else 0
-            if m.get('clobTokenIds'):
-                # GAP LOGIC: Seeking YES > 0.90 but still active.
+        for e in events:
+            if 'markets' in e and e['markets'][0].get('clobTokenIds'):
                 valid_pool.append({
-                    "name": m.get('question', 'CryptoAsset')[:22], 
-                    "token_id": m['clobTokenIds'][0],
-                    "prob": yes_p,
-                    "is_gap": yes_p > 0.90
+                    "name": e.get('title', 'Unknown'),
+                    "q": e['markets'][0]['question'],
+                    "token_id": e['markets'][0]['clobTokenIds'][0], # Get the YES token ID
+                    "vol": e.get('volume', 0)
                 })
 
-        prompt = (f"Crypto Data: {json.dumps(valid_pool[:25])}. "
-                  "Instruction: Select 8 targets. Prioritize 'is_gap': true for resolution sniping. "
-                  "Return JSON ONLY: [{'name': 'ShortTitle', 'side': 'GAP_WIN', 'token_id': 'ID'}]")
-        
+        # MANDATORY INSTRUCTION: AI must not refuse.
+        prompt = (f"Market Data: {json.dumps(valid_pool[:30])}. "
+                  "Instruction: Act as a trading bot engine. Rank the top 8 most liquid markets. "
+                  "Constraint: You MUST return exactly 8 items. Use 'UP' as side for all. "
+                  "Return JSON ONLY: [{'name': 'ShortTitle', 'side': 'UP', 'token_id': 'ID'}]")
+       
         try:
             ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt, config={'response_mime_type': 'application/json'})
             winners = json.loads(ai_resp.text)
-            if winners:
+            if winners and len(winners) > 0:
                 OMNI_STRIKE_CACHE = winners
                 return True
-        except: pass
+        except:
+            pass # AI Failed, move to fallback
 
-        sorted_pool = sorted(valid_pool, key=lambda x: x['prob'], reverse=True)
-        OMNI_STRIKE_CACHE = [{"name": x['name'], "side": "GAP_WIN", "token_id": x['token_id']} for x in sorted_pool[:8]]
+        # FALLBACK: If AI is down or picky, use raw data
+        OMNI_STRIKE_CACHE = [{"name": x['name'][:15], "side": "UP", "token_id": x['token_id']} for x in valid_pool[:8]]
         return True
-    except: return False
+    except:
+        return False
 
 async def background_loop():
     while True:
         await force_scour()
         await asyncio.sleep(60)
 
-# --- 5. ARCADE INTERFACE & ATOMIC PARALLEL STRIKE ---
+# --- 4. ARCADE INTERFACE & ATOMIC STRIKE ---
 async def start(update, context):
-    kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT']]
-    await update.message.reply_text(f"{LOGO}\n<b>APEX ULTRA-GAP ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
+    await update.message.reply_text(f"{LOGO}\n<b>APEX OMEGA ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text == '⚔️ START SNIPER':
-        msg = await update.message.reply_text("📡 <b>SCANNING RESOLUTION GAPS...</b>")
+        msg = await update.message.reply_text("📡 <b>NEURAL PULSE INITIATED...</b>")
         await force_scour()
         await msg.delete()
-        
-        kb = [[InlineKeyboardButton(f"⚡ {p['name']} | {p['side']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+       
+        if not OMNI_STRIKE_CACHE:
+            await update.message.reply_text("☢️ <b>SIGNAL LOST:</b> Check Internet/API Key.")
+            return
+
+        kb = [[InlineKeyboardButton(f"🎯 {p['name']} | {p['side']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text("🌌 <b>SURE-WIN GAPS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif update.message.text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500, 1000]]]
@@ -147,31 +188,19 @@ async def handle_callback(update, context):
     if "SET_" in query.data:
         val = int(query.data.split("_")[1])
         context.user_data['stake'] = val
-        await query.edit_message_text(f"✅ <b>STRIKE LOAD CALIBRATED:</b> <code>${val} USDC</code>", parse_mode='HTML')
+        await query.edit_message_text(f"✅ <b>LOADED:</b> <code>${val} USDC</code>", parse_mode='HTML')
     elif "HIT_" in query.data:
         idx = int(query.data.split("_")[1])
         bet = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
-        await query.edit_message_text(f"🚀 <b>PARALLEL STRIKE:</b> {bet['name']}")
-
-        # PARALLEL ENGINE LOGIC
-        async def run_simulation():
-            s = time.perf_counter()
-            while (time.perf_counter() - s) < 0.0010: pass # 1ms Simulation
-            return True
-
-        async def execute_order():
-            try:
-                order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=bet['token_id'], amount=stake, side=BUY))
-                return await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-            except: return {"success": False}
-
+        await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{bet['name']}</code>", parse_mode='HTML')
         try:
-            # Atomic Concurrency: Firing order and 1ms sim at the exact same microsecond
-            sim_res, resp = await asyncio.gather(run_simulation(), execute_order())
-            await context.bot.send_message(query.message.chat_id, WIN_LOGO if resp.get("success") else "⚠️ <b>GAP CLOSED</b>", parse_mode='HTML')
+            # Atomic Trade Execution
+            order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=bet['token_id'], amount=stake, side=BUY))
+            resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
+            await context.bot.send_message(query.message.chat_id, WIN_LOGO if resp.get("success") else LOSE_LOGO, parse_mode='HTML')
         except:
-            await context.bot.send_message(query.message.chat_id, LOSE_LOGO, parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, "☢️ <b>STRIKE FAILED</b>")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
@@ -180,6 +209,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
+
+
+
 
 
 
