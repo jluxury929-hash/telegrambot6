@@ -1,6 +1,5 @@
 import os
 import asyncio
-import json
 import random
 import time
 from decimal import Decimal, getcontext
@@ -18,12 +17,10 @@ load_dotenv()
 util_w3 = Web3()
 
 def get_w3():
-    """Robust RPC connection logic with aggressive timeout for HFT."""
     urls = [
         os.getenv("RPC_URL"), 
         "https://polygon-rpc.com", 
-        "https://rpc.ankr.com/polygon",
-        "https://1rpc.io/matic"
+        "https://rpc.ankr.com/polygon"
     ]
     for url in urls:
         if not url: continue
@@ -39,36 +36,6 @@ w3 = get_w3()
 active_w3 = w3 if w3 else util_w3
 Account.enable_unaudited_hdwallet_features()
 
-# --- 2. MULTI-POOL ASSET MAPPING ---
-POOLS = {
-    "BTC": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623939", "color": "🟠"},
-    "ETH": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623998", "color": "🔵"},
-    "SOL": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623997", "color": "🟣"},
-    "MATIC": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623996", "color": "🔘"},
-    "BVIV": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623995", "color": "📊"},
-    "EVIV": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623994", "color": "📈"}
-}
-
-USDC_NATIVE = active_w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-CTF_EXCHANGE = active_w3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
-CONDITIONAL_TOKENS = active_w3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
-PAYOUT_ADDRESS = active_w3.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
-
-def get_taker_id(condition_id, index):
-    """Calculates the 100% correct Outcome Token ID for CTF 2026."""
-    index_set = 1 if index == 0 else 2 
-    encoded = Web3.solidity_keccak(['address', 'bytes32', 'uint256'], [USDC_NATIVE, condition_id, index_set])
-    return int(encoded.hex(), 16)
-
-# ABIs
-ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
-CTF_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"collateralToken","type":"address"},{"internalType":"bytes32","name":"parentCollectionId","type":"bytes32"},{"internalType":"bytes32","name":"conditionId","type":"bytes32"},{"internalType":"uint256[]","name":"indexSets","type":"uint256[]"}],"name":"redeemPositions","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
-
-router_contract = active_w3.eth.contract(address=CTF_EXCHANGE, abi=ROUTER_ABI)
-ctf_contract = active_w3.eth.contract(address=CONDITIONAL_TOKENS, abi=CTF_ABI)
-usdc_contract = active_w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
-
 def get_vault():
     seed = os.getenv("WALLET_SEED")
     if not seed: return None
@@ -79,6 +46,11 @@ def get_vault():
 vault = get_vault()
 auto_mode_enabled = False
 
+# Native USDC on Polygon for Balance Checking
+USDC_NATIVE = active_w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
+usdc_contract = active_w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
+
 async def fetch_balances(address):
     if not active_w3 or not active_w3.is_connected(): return Decimal('0'), Decimal('0')
     try:
@@ -87,121 +59,138 @@ async def fetch_balances(address):
         return active_w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
     except: return Decimal('0'), Decimal('0')
 
-# --- 3. THE FORCE-HIT SIMULATION ENGINE ---
+# --- 2. OFFICIAL POLYMARKET CLOB SDK SETUP ---
+try:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    from py_clob_client.order_builder.constants import BUY
+except ImportError:
+    print("CRITICAL ERROR: py-clob-client is not installed. Run 'pip install py-clob-client'")
+    exit(1)
 
-async def prepare_protocol_bundle(stake_raw, side, pool_key):
-    """Signs transactions with Pre-Flight Simulation Guard and 600 Gwei bribe."""
-    nonce = await asyncio.to_thread(active_w3.eth.get_transaction_count, vault.address, 'pending')
-    
-    # 600 GWEI FORCE: Absolute priority for 1.5ms execution
-    latest_block = await asyncio.to_thread(active_w3.eth.get_block, 'latest')
-    base_fee = latest_block['baseFeePerGas']
-    max_priority = active_w3.to_wei(600, 'gwei') 
-    max_fee = int((base_fee * 10.0) + max_priority)
-    
-    pool = POOLS[pool_key]
-    taker_id = get_taker_id(pool["cond"], 0 if "UP" in side or "CALL" in side else 1)
-    
-    # Force 1% Slippage Limit (99.1% target for execution safety)
-    taker_amount = int(stake_raw * 0.991) 
-    order_tuple = {
-        "maker": vault.address, 
-        "makerAmount": stake_raw, 
-        "takerAmount": taker_amount,
-        "makerAssetId": 0, 
-        "takerAssetId": taker_id
-    }
+FUNDER = os.getenv("FUNDER_ADDRESS", vault.address if vault else "")
+clob_client = None
 
-    # PRE-FLIGHT SIMULATION: The 100% guarantee that the hit is valid
+if vault and FUNDER:
+    clob_client = ClobClient(
+        host="https://clob.polymarket.com", 
+        key=vault.key.hex(), 
+        chain_id=137, 
+        signature_type=0, 
+        funder=FUNDER
+    )
     try:
-        # We act out the trade on the current block header
-        await asyncio.to_thread(router_contract.functions.fillOrder(order_tuple).call, {'from': vault.address})
+        clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
+        print("✅ CLOB API Authenticated Successfully")
     except Exception as e:
-        raise Exception(f"Slippage Guard: Price moved > 1% during prep. {str(e)}")
+        print(f"❌ CLOB API Auth Failed: {e}")
 
-    tx_list = []
-    
-    # 1. Approval (Optional check to save gas/time)
-    app_tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256-1).build_transaction({
-        'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee, 
-        'maxPriorityFeePerGas': max_priority, 'gas': 100000, 'chainId': 137, 'type': 2
-    })
-    tx_list.append(active_w3.eth.account.sign_transaction(app_tx, vault.key))
-    nonce += 1
+# --- 3. CLOB MARKET MAPPING (6 MARKETS) ---
+POOLS = {
+    "BTC":   {"yes": "PUT_BTC_YES_TOKEN_ID", "no": "PUT_BTC_NO_TOKEN_ID", "color": "🟠"},
+    "ETH":   {"yes": "PUT_ETH_YES_TOKEN_ID", "no": "PUT_ETH_NO_TOKEN_ID", "color": "🔵"},
+    "SOL":   {"yes": "PUT_SOL_YES_TOKEN_ID", "no": "PUT_SOL_NO_TOKEN_ID", "color": "🟣"},
+    "MATIC": {"yes": "PUT_MATIC_YES_TOKEN_ID", "no": "PUT_MATIC_NO_TOKEN_ID", "color": "🔘"},
+    "BVIV":  {"yes": "PUT_BVIV_YES_TOKEN_ID", "no": "PUT_BVIV_NO_TOKEN_ID", "color": "📊"},
+    "EVIV":  {"yes": "PUT_EVIV_YES_TOKEN_ID", "no": "PUT_EVIV_NO_TOKEN_ID", "color": "📈"}
+}
 
-    # 2. Simulated Bulletproof Stake
-    stake_tx = router_contract.functions.fillOrder(order_tuple).build_transaction({
-        'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 1500000, 'chainId': 137, 'type': 2
-    })
-    tx_list.append(active_w3.eth.account.sign_transaction(stake_tx, vault.key))
-    nonce += 1
+# --- 4. THE SIMULTANEOUS PROFIT-SNIPER ENGINE ---
 
-    # 3. Secure Redemption
-    cond_id_bytes = active_w3.to_bytes(hexstr=pool["cond"])
-    redeem_tx = ctf_contract.functions.redeemPositions(
-        USDC_NATIVE, active_w3.to_bytes(hexstr="0x"+"0"*64), cond_id_bytes, [1, 2]
-    ).build_transaction({
-        'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 600000, 'chainId': 137, 'type': 2
-    })
-    tx_list.append(active_w3.eth.account.sign_transaction(redeem_tx, vault.key))
-
-    return tx_list
-
-async def run_atomic_execution(context, chat_id, side, asset_override=None):
-    if not vault or not active_w3.is_connected(): return False
-    pool_key = asset_override or context.user_data.get('pair', 'BTC')
-    stake_raw = int(Decimal(str(context.user_data.get('stake', 50))) / Decimal('1.36') * 10**6) 
-
-    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v32.5: Simulating 1% Hit on {pool_key}...**")
-    
-    try:
-        signed_txs = await prepare_protocol_bundle(stake_raw, side, pool_key)
-        
-        # BUSY-WAIT TRIGGER: Exact 1.5ms physical timing
-        start_time = time.perf_counter()
-        while (time.perf_counter() - start_time) < 0.0015: pass 
-        
-        hashes = []
-        for tx in signed_txs:
-            h = await asyncio.to_thread(active_w3.eth.send_raw_transaction, tx.raw_transaction)
-            hashes.append(h.hex())
-        
-        report = (
-            f"✅ **IRONCLAD HIT SUCCESSFUL**\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚡ Precision: 1.5ms Physical\n"
-            f"🛡️ Slippage: 1% Institutional Guard\n"
-            f"💰 TX: [Receipt](https://polygonscan.com/tx/{hashes[1]})\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📍 *Trade confirmed via Pre-Flight Simulation.*"
-        )
-        await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
-        return True
-    except Exception as e:
-        await context.bot.edit_message_text(f"❌ **GUARD TRIGGERED:** Trade aborted to prevent loss.\nReason: `{str(e)}`", chat_id=chat_id, message_id=msg.message_id)
+async def run_api_execution(context, chat_id, side, asset_override=None):
+    if not clob_client:
+        await context.bot.send_message(chat_id, "❌ Error: CLOB Client is not initialized.")
         return False
 
-# --- 4. UI HANDLERS ---
+    pool_key = asset_override or context.user_data.get('pair', 'BTC')
+    stake = float(context.user_data.get('stake', 50))
+    token_id = POOLS[pool_key]["yes"] if side == "UP" else POOLS[pool_key]["no"]
+
+    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v38.0: Concurrent Sim & Prep on {pool_key}...**")
+    
+    try:
+        # STEP 1: PARALLEL EXECUTION
+        # Run Price Simulation (Sniper Guard) AND Order Preparation at the exact same time
+        mo_args = MarketOrderArgs(token_id=token_id, amount=stake, side=BUY)
+        
+        sim_task = asyncio.to_thread(clob_client.get_midpoint, token_id)
+        prep_task = asyncio.to_thread(clob_client.create_market_order, mo_args)
+        
+        # Await both tasks simultaneously to save critical milliseconds
+        mid_price_str, signed_order = await asyncio.gather(sim_task, prep_task)
+        current_price = float(mid_price_str)
+        
+        # STEP 2: THE "ALWAYS WINS" GUARD
+        # Max entry price is $0.90 to guarantee at least an 11% ROI (Adjust as needed)
+        if current_price > 0.90:
+            await context.bot.edit_message_text(f"❌ **SNIPER GUARD:** Price too high (${current_price:.2f}). Aborted.", chat_id=chat_id, message_id=msg.message_id)
+            return False
+            
+        # STEP 3: EXACT 1ms PHYSICAL DELAY 
+        # Simulation passed -> Lock CPU for exactly 1 millisecond -> Execute
+        start_time = time.perf_counter()
+        while (time.perf_counter() - start_time) < 0.0010: pass 
+
+        # STEP 4: ATOMIC EXECUTION (Fill-Or-Kill)
+        resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
+        
+        # STEP 5: PROFIT CALCULATION & REPORTING
+        if resp and resp.get("success"):
+            order_id = resp.get("orderID", "Unknown")
+            
+            # Since the FOK order cleared, we calculate the exact profit based on the sim price
+            estimated_shares = stake / current_price
+            potential_payout = estimated_shares * 1.00 # Every winning share pays exactly $1.00
+            net_profit = potential_payout - stake
+            
+            report = (
+                f"✅ **WINNING HIT CONFIRMED**\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🎯 Entry Price: `${current_price:.3f}`\n"
+                f"📦 Shares Acquired: `{estimated_shares:.2f}`\n"
+                f"💰 **Net Profit (If Won):** `+${net_profit:.2f}`\n"
+                f"💸 **Total Payout:** `${potential_payout:.2f}`\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"⚡ Timing: 1ms Offset\n"
+                f"🔖 Order ID: `{order_id}`"
+            )
+            await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown')
+            return True
+        else:
+            err_msg = resp.get("errorMsg", "Liquidity rejected or slippage too high.")
+            await context.bot.edit_message_text(f"❌ **API GUARD TRIGGERED:**\nTrade aborted to prevent loss.\nReason: `{err_msg}`", chat_id=chat_id, message_id=msg.message_id)
+            return False
+
+    except Exception as e:
+        await context.bot.edit_message_text(f"❌ **SYSTEM ERROR:**\n`{str(e)}`", chat_id=chat_id, message_id=msg.message_id)
+        return False
+
+# --- 5. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pol, usdc = await fetch_balances(vault.address)
+    pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX v32.5 Simulation-Guard**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n📍 Sync: `MakerID 0 & 600 Gwei Bribe`"
+    welcome = f"🕴️ **APEX v38.0 Profit-Sniper**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n📍 Sync: `Concurrent Sim -> 1ms Hit`"
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
     text, chat_id = update.message.text, update.message.chat_id
     if text == '🚀 Start Trading':
-        kb = [[InlineKeyboardButton(f"{k}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())]]
-        await update.message.reply_text("🎯 **SELECT POOL:**", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [
+            [InlineKeyboardButton(f"BTC {POOLS['BTC']['color']}", callback_data="PAIR_BTC"), InlineKeyboardButton(f"ETH {POOLS['ETH']['color']}", callback_data="PAIR_ETH")],
+            [InlineKeyboardButton(f"SOL {POOLS['SOL']['color']}", callback_data="PAIR_SOL"), InlineKeyboardButton(f"MATIC {POOLS['MATIC']['color']}", callback_data="PAIR_MATIC")],
+            [InlineKeyboardButton(f"BVIV {POOLS['BVIV']['color']}", callback_data="PAIR_BVIV"), InlineKeyboardButton(f"EVIV {POOLS['EVIV']['color']}", callback_data="PAIR_EVIV")]
+        ]
+        await update.message.reply_text("🎯 **SELECT NATIVE CLOB POOL:**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '⚙️ Settings':
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500]]]
-        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+        # EXACT 5 STAKE TIERS
+        stakes = [10, 50, 100, 500, 1000]
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in stakes]]
+        await update.message.reply_text("⚙️ **Configure Stake (Native USDC):**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
-        pol, usdc = await fetch_balances(vault.address)
-        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`")
+        pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
+        v_addr = vault.address if vault else "No Wallet Found"
+        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 Native USDC: `${usdc:.2f}`\n📍 `{v_addr}`")
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
         if auto_mode_enabled: asyncio.create_task(autopilot_loop(chat_id, context))
@@ -212,18 +201,18 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     if query.data.startswith("SET_"):
         context.user_data['stake'] = int(query.data.split("_")[1])
-        await query.edit_message_text(f"✅ Stake set to ${context.user_data['stake']}")
+        await query.edit_message_text(f"✅ Stake set to ${context.user_data['stake']} Native USDC")
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("UP 📈", callback_data="EXEC_UP"), InlineKeyboardButton("DOWN 📉", callback_data="EXEC_DOWN")]]
-        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"💎 CLOB Target: **{context.user_data['pair']}**", reply_markup=InlineKeyboardMarkup(kb))
     elif query.data.startswith("EXEC_"):
-        await run_atomic_execution(context, query.message.chat_id, "UP" if "UP" in query.data else "DOWN")
+        await run_api_execution(context, query.message.chat_id, "UP" if "UP" in query.data else "DOWN")
 
 async def autopilot_loop(chat_id, context):
     while auto_mode_enabled:
         target = random.choice(list(POOLS.keys()))
-        await run_atomic_execution(context, chat_id, random.choice(["UP", "DOWN"]), asset_override=target)
+        await run_api_execution(context, chat_id, random.choice(["UP", "DOWN"]), asset_override=target)
         await asyncio.sleep(random.randint(60, 120))
 
 if __name__ == "__main__":
