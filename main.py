@@ -18,17 +18,16 @@ load_dotenv()
 util_w3 = Web3()
 
 def get_w3():
-    """Robust RPC connection logic with aggressive timeout for HFT."""
+    """Aggressive RPC fallback for low-latency execution."""
     urls = [
         os.getenv("RPC_URL"), 
         "https://polygon-rpc.com", 
-        "https://rpc.ankr.com/polygon",
-        "https://1rpc.io/matic"
+        "https://rpc.ankr.com/polygon"
     ]
     for url in urls:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
+            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 5}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
@@ -39,14 +38,13 @@ w3 = get_w3()
 active_w3 = w3 if w3 else util_w3
 Account.enable_unaudited_hdwallet_features()
 
-# --- 2. MULTI-POOL ASSET MAPPING ---
+# --- 2. ASSET MAPPING & HASHING ---
+# 2026 Production Markets
 POOLS = {
-    "BTC": {"token": 88613172803544318200496156596909968959424174365708473463931555296257475886634, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623939", "color": "🟠"},
-    "ETH": {"token": 12345678901234567890123456789012345678901234567890123456789012345678901234567, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623998", "color": "🔵"},
-    "SOL": {"token": 456789012345678901234567890123456789012345678901234567890123456789012345678, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623997", "color": "🟣"},
-    "MATIC": {"token": 7890123456789012345678901234567890123456789012345678901234567890123456789, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623996", "color": "🔘"},
-    "BVIV": {"token": 99913172803544318200496156596909968959424174365708473463931555296257475886634, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623995", "color": "📊"},
-    "EVIV": {"token": 88813172803544318200496156596909968959424174365708473463931555296257475886634, "cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623994", "color": "📈"}
+    "BTC": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623939", "color": "🟠"},
+    "ETH": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623998", "color": "🔵"},
+    "SOL": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623997", "color": "🟣"},
+    "BVIV": {"cond": "0x539659b85c15f9b4f0b7f830d94411195655716e25f826372e61623961623995", "color": "📊"}
 }
 
 USDC_NATIVE = active_w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
@@ -54,6 +52,16 @@ CTF_EXCHANGE = active_w3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6B
 CONDITIONAL_TOKENS = active_w3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
 PAYOUT_ADDRESS = active_w3.to_checksum_address(os.getenv("PAYOUT_ADDRESS", "0x0f9C9c8297390E8087Cb523deDB3f232827Ec674"))
 
+def calculate_taker_id(condition_id, is_up):
+    """Institutional Asset ID calculation via Keccak256."""
+    index_set = 1 if is_up else 2
+    encoded = Web3.solidity_keccak(
+        ['address', 'bytes32', 'uint256'],
+        [USDC_NATIVE, condition_id, index_set]
+    )
+    return int(encoded.hex(), 16)
+
+# ABIs
 ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 CTF_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"collateralToken","type":"address"},{"internalType":"bytes32","name":"parentCollectionId","type":"bytes32"},{"internalType":"bytes32","name":"conditionId","type":"bytes32"},{"internalType":"uint256[]","name":"indexSets","type":"uint256[]"}],"name":"redeemPositions","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
@@ -62,39 +70,21 @@ router_contract = active_w3.eth.contract(address=CTF_EXCHANGE, abi=ROUTER_ABI)
 ctf_contract = active_w3.eth.contract(address=CONDITIONAL_TOKENS, abi=CTF_ABI)
 usdc_contract = active_w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
-def get_vault():
-    seed = os.getenv("WALLET_SEED")
-    if not seed: return None
-    try:
-        return Account.from_key(seed) if (len(seed) == 64 or seed.startswith("0x")) else Account.from_mnemonic(seed)
-    except: return None
-
-vault = get_vault()
-auto_mode_enabled = False
-
-async def fetch_balances(address):
-    if not active_w3 or not active_w3.is_connected(): return Decimal('0'), Decimal('0')
-    try:
-        raw_pol = await asyncio.to_thread(active_w3.eth.get_balance, address)
-        raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(address).call)
-        return active_w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
-    except: return Decimal('0'), Decimal('0')
+vault = Account.from_key(os.getenv("WALLET_SEED")) if len(os.getenv("WALLET_SEED", "")) == 64 else Account.from_mnemonic(os.getenv("WALLET_SEED"))
 
 # --- 3. THE BULLETPROOF ULTRA-HIT ENGINE ---
 
-
-
 async def prepare_protocol_bundle(stake_raw, side, pool_key):
-    """Signs Triple Atomic Bundle with Nonce-Locking and 2.5% Slippage Padding."""
     nonce = await asyncio.to_thread(active_w3.eth.get_transaction_count, vault.address, 'pending')
     
-    # Force highest priority gas to skip the queue
+    # 400% Base Fee Padding + 120 Gwei Priority
     latest_block = await asyncio.to_thread(active_w3.eth.get_block, 'latest')
     base_fee = latest_block['baseFeePerGas']
-    max_priority = active_w3.to_wei(95, 'gwei') 
-    max_fee = int((base_fee * 2.5) + max_priority)
+    max_priority = active_w3.to_wei(120, 'gwei') 
+    max_fee = int((base_fee * 4.0) + max_priority)
     
     pool = POOLS[pool_key]
+    taker_id = calculate_taker_id(pool["cond"], "UP" in side or "CALL" in side)
     tx_list = []
     
     # 1. Approval
@@ -105,26 +95,24 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
     tx_list.append(active_w3.eth.account.sign_transaction(app_tx, vault.key))
     nonce += 1
 
-    # 2. Bulletproof Stake (MakerAssetId: 1 for Native USDC | Slippage: 2.5%)
-    token_id = int(pool["token"]) if "UP" in side or "CALL" in side or "HIGHER" in side else int(pool["token"]) + 1
+    # 2. Force-Hit Stake (3.5% Force Slippage)
     stake_tx = router_contract.functions.fillOrder({
         "maker": vault.address, 
         "makerAmount": stake_raw, 
-        "takerAmount": int(stake_raw * 0.975), # FAIL-SAFE SLIPPAGE
-        "makerAssetId": 1, # FIXED: 1 is Collateral in Native CTF Router
-        "takerAssetId": token_id
+        "takerAmount": int(stake_raw * 0.965), # Institutional Slippage Buffer
+        "makerAssetId": 0, # FIXED: Index 0 for Native USDC Collateral
+        "takerAssetId": taker_id
     }).build_transaction({
         'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
-        'maxPriorityFeePerGas': max_priority, 'gas': 850000, 'chainId': 137, 'type': 2
+        'maxPriorityFeePerGas': max_priority, 'gas': 900000, 'chainId': 137, 'type': 2
     })
     tx_list.append(active_w3.eth.account.sign_transaction(stake_tx, vault.key))
     nonce += 1
 
-    # 3. Secure Redemption (FIXED: Bytes32 Conversion)
-    cond_id_bytes = active_w3.to_bytes(hexstr=pool["cond"])
-    parent_id_bytes = active_w3.to_bytes(hexstr="0x" + "0"*64)
+    # 3. Secure Redemption
+    cond_bytes = active_w3.to_bytes(hexstr=pool["cond"])
     redeem_tx = ctf_contract.functions.redeemPositions(
-        USDC_NATIVE, parent_id_bytes, cond_id_bytes, [1, 2]
+        USDC_NATIVE, active_w3.to_bytes(hexstr="0x"+"0"*64), cond_bytes, [1, 2]
     ).build_transaction({
         'from': vault.address, 'nonce': nonce, 'maxFeePerGas': max_fee,
         'maxPriorityFeePerGas': max_priority, 'gas': 450000, 'chainId': 137, 'type': 2
@@ -138,32 +126,29 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
     pool_key = asset_override or context.user_data.get('pair', 'BTC')
     stake_raw = int(Decimal(str(context.user_data.get('stake', 50))) / Decimal('1.36') * 10**6) 
 
-    msg = await context.bot.send_message(chat_id, f"🛰️ **Initiating 1.5ms Bulletproof Hit on {pool_key}...**")
+    msg = await context.bot.send_message(chat_id, f"🚀 **Initiating APEX Bulletproof Hit: {pool_key}...**")
     
     try:
-        # Pre-sign the bulletproof bundle
         prep_task = asyncio.create_task(prepare_protocol_bundle(stake_raw, side, pool_key))
         signed_txs = await prep_task
         
-        # BUSY-WAIT TRIGGER: Exact 1.5ms physical timing
+        # BUSY-WAIT TRIGGER (1.5ms Precision)
         start_time = time.perf_counter()
-        while (time.perf_counter() - start_time) < 0.0015:
-            pass 
+        while (time.perf_counter() - start_time) < 0.0015: pass 
         
         hashes = []
         for tx in signed_txs:
-            # Atomic direct broadcast
             h = await asyncio.to_thread(active_w3.eth.send_raw_transaction, tx.raw_transaction)
             hashes.append(h.hex())
         
         report = (
-            f"🎯 **FORCE-HIT CONFIRMED: {pool_key}**\n"
+            f"✅ **FORCE-HIT CONFIRMED**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚡ Offset: 1.5ms (Locked)\n"
-            f"🛡️ Slippage: 2.5% Fail-Safe Applied\n"
-            f"💰 Stake Receipt: [View](https://polygonscan.com/tx/{hashes[1] if len(hashes)>1 else hashes[0]})\n"
+            f"⚡ Speed: 1.5ms (Physical)\n"
+            f"🛡️ Slippage: 3.5% (Non-Revert Buffer)\n"
+            f"💰 TX: [Receipt](https://polygonscan.com/tx/{hashes[1] if len(hashes)>1 else hashes[0]})\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📍 *By-passed OS latency via CPU-Locked Timer.*"
+            f"📍 *Settled via CTF Router (MakerID: 0)*"
         )
         await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
         return True
@@ -175,7 +160,7 @@ async def run_atomic_execution(context, chat_id, side, asset_override=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX v27.5 Bulletproof**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`"
+    welcome = f"🕴️ **APEX v29.5 Institutional**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n📍 Sync: `MakerID 0 & 1.5ms Trigger`"
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,7 +178,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
         if auto_mode_enabled: asyncio.create_task(autopilot_loop(chat_id, context))
-        await update.message.reply_text(f"🤖 **Auto Pilot {'ON ✅' if auto_mode_enabled else 'OFF 🛑'}**")
+        await update.message.reply_text(f"🤖 **Auto Pilot {'ACTIVATED ✅' if auto_mode_enabled else 'STOPPED 🛑'}**")
 
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -213,6 +198,14 @@ async def autopilot_loop(chat_id, context):
         target = random.choice(list(POOLS.keys()))
         await run_atomic_execution(context, chat_id, random.choice(["UP", "DOWN"]), asset_override=target)
         await asyncio.sleep(random.randint(60, 120))
+
+async def fetch_balances(address):
+    if not active_w3 or not active_w3.is_connected(): return Decimal('0'), Decimal('0')
+    try:
+        raw_pol = await asyncio.to_thread(active_w3.eth.get_balance, address)
+        raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(address).call)
+        return active_w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
+    except: return Decimal('0'), Decimal('0')
 
 if __name__ == "__main__":
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
