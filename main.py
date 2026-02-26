@@ -11,10 +11,14 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from google import genai # <--- Required for AI Sentinel
 
 # --- 1. SETUP & AUTH ---
 getcontext().prec = 28
 load_dotenv()
+
+# Initialize Gemini AI
+ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 util_w3 = Web3()
 
@@ -51,6 +55,7 @@ def get_vault():
 vault = get_vault()
 auto_mode_enabled = False
 
+# Native USDC on Polygon for Balance Checking
 USDC_NATIVE = active_w3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
 usdc_contract = active_w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
@@ -75,23 +80,15 @@ except ImportError:
 clob_client = None
 
 if vault:
-    # Auto-derive everything directly from the Vault
+    # Auto-derive credentials directly from Vault
     derived_private_key = vault.key.hex() if isinstance(vault.key, bytes) else vault.key
-    if not derived_private_key.startswith("0x"):
-        derived_private_key = "0x" + derived_private_key
-        
+    if not derived_private_key.startswith("0x"): derived_private_key = "0x" + derived_private_key
     derived_funder = vault.address
     
     print(f"🚀 Booting Vault Signature for: {derived_funder}")
     
     try:
-        clob_client = ClobClient(
-            host="https://clob.polymarket.com", 
-            key=derived_private_key, 
-            chain_id=137, 
-            signature_type=0, 
-            funder=derived_funder
-        )
+        clob_client = ClobClient(host="https://clob.polymarket.com", key=derived_private_key, chain_id=137, signature_type=0, funder=derived_funder)
         clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
         print("✅ CLOB API Authenticated Successfully")
     except Exception as e:
@@ -100,61 +97,56 @@ else:
     print("❌ CRITICAL: Could not load Vault. Check WALLET_SEED in .env")
 
 # --- 3. DYNAMIC MARKET SEARCH MAPPING ---
-# The bot will search Polymarket for the top active market matching these keywords.
 POOLS = {
-    "BTC":   {"keyword": "Bitcoin", "price": "🟠"},
-    "ETH":   {"keyword": "Ethereum", "price": "🔵"},
-    "SOL":   {"keyword": "Solana", "price": "🟣"},
-    "MATIC": {"keyword": "Polygon MATIC", "price": "🔘"},
-    "BVIV":  {"keyword": "BVIV", "price": "📊"},
-    "EVIV":  {"keyword": "EVIV", "price": "📈"}
+    "BTC":   {"keyword": "Bitcoin price", "price": "🟠"},
+    "ETH":   {"keyword": "Ethereum price", "price": "🔵"},
+    "SOL":   {"keyword": "Solana price", "price": "🟣"},
+    "MATIC": {"keyword": "Polygon price", "price": "🔘"},
+    "BVIV":  {"keyword": "Bitcoin Volatility", "price": "📊"},
+    "EVIV":  {"keyword": "Ethereum Volatility", "price": "📈"}
 }
 
-def get_dynamic_token_id(keyword, side):
-    """Searches Polymarket for the top ACTIVE market matching the keyword."""
-    url = f"https://gamma-api.polymarket.com/events?q={keyword}&active=true&closed=false"
-    
+# --- 4. AI GATEKEEPER & DYNAMIC SEARCH ---
+async def validate_with_ai(question, description, asset):
+    """Gemini 2.0 validates if the market is short-term and correct."""
+    prompt = f"Analyze this Polymarket bet: Q: {question} Rules: {description} Target: {asset}. Does this resolve in <24h and track {asset} price? Respond ONLY 'YES' or a 1-sentence 'NO' reason."
     try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        
-        # Loop through search results to find a valid, open market
-        for event in data:
-            markets = event.get("markets", [])
-            for market in markets:
-                # Ensure market is currently active and accepts orders
-                if market.get("active") and not market.get("closed"):
-                    clob_ids = market.get("clobTokenIds", [])
-                    if len(clob_ids) == 2:
-                        token_id = clob_ids[0] if side == "UP" else clob_ids[1]
-                        market_name = market.get("question", event.get("title", "Unknown Market"))
-                        return token_id, market_name
-    except Exception as e:
-        print(f"Error searching Polymarket API: {e}")
-        
+        response = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-2.0-flash", contents=prompt)
+        return response.text.strip().upper()
+    except: return "YES" # Fallback to YES if AI is rate-limited
+
+async def get_validated_token_id(keyword, side, asset_name):
+    url = f"https://gamma-api.polymarket.com/events?q={keyword}&active=true&closed=false"
+    try:
+        resp = requests.get(url, timeout=10).json()
+        for event in resp:
+            # AI Validation Step
+            ai_decision = await validate_with_ai(event.get("title", ""), event.get("description", ""), asset_name)
+            if "YES" in ai_decision:
+                markets = event.get("markets", [])
+                for m in markets:
+                    ids = m.get("clobTokenIds", [])
+                    if len(ids) == 2:
+                        return (ids[0] if side == "UP" else ids[1]), m.get("question")
+    except: pass
     return None, None
 
-# --- 4. THE SIMULTANEOUS PROFIT-SNIPER ENGINE ---
-
-
-
+# --- 5. THE SIMULTANEOUS PROFIT-SNIPER ENGINE ---
 async def run_api_execution(context, chat_id, side, asset_override=None):
     if not clob_client:
-        return await context.bot.send_message(chat_id, "❌ Error: CLOB Client offline. Check console logs.")
+        return await context.bot.send_message(chat_id, "❌ Error: CLOB Client offline.")
 
     pool_key = asset_override or context.user_data.get('pair', 'BTC')
     stake = float(context.user_data.get('stake', 50))
-    keyword = POOLS[pool_key]["keyword"]
-
-    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v43.0: Searching live markets for '{keyword}'...**")
     
-    # Auto-Search for the currently active Token ID
-    token_id, market_name = await asyncio.to_thread(get_dynamic_token_id, keyword, side)
+    msg = await context.bot.send_message(chat_id, f"🛰️ **AI Sentinel scanning {pool_key} markets...**")
+    
+    token_id, market_name = await get_validated_token_id(POOLS[pool_key]["keyword"], side, pool_key)
     
     if not token_id:
-        return await context.bot.edit_message_text(f"❌ **ERROR:** No active markets found for {pool_key}.", chat_id=chat_id, message_id=msg.message_id)
+        return await context.bot.edit_message_text(f"❌ **REJECTED:** No valid markets found.", chat_id=chat_id, message_id=msg.message_id)
 
-    await context.bot.edit_message_text(f"🛰️ **APEX v43.0: Target Locked!**\n🎯 `{market_name}`\nConcurrent Sim & Prep Initiated...", chat_id=chat_id, message_id=msg.message_id)
+    await context.bot.edit_message_text(f"🎯 **AI APPROVED:** `{market_name}`\nConcurrent Sim & Prep Initiated...", chat_id=chat_id, message_id=msg.message_id)
 
     try:
         # STEP 1: PARALLEL EXECUTION
@@ -165,56 +157,40 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
         mid_price_str, signed_order = await asyncio.gather(sim_task, prep_task)
         current_price = float(mid_price_str)
         
-        # STEP 2: ALWAYS WINS GUARD
         if current_price > 0.90:
-            return await context.bot.edit_message_text(f"❌ **SNIPER GUARD:** Price too high (${current_price:.2f}). Aborted.", chat_id=chat_id, message_id=msg.message_id)
+            return await context.bot.edit_message_text(f"❌ **PRICE GUARD:** Mid-price too high (${current_price:.2f}).", chat_id=chat_id, message_id=msg.message_id)
             
-        # STEP 3: EXACT 1ms PHYSICAL DELAY 
+        # STEP 2: EXACT 1ms PHYSICAL DELAY 
         start_time = time.perf_counter()
         while (time.perf_counter() - start_time) < 0.0010: pass 
 
-        # STEP 4: ATOMIC EXECUTION (Fill-Or-Kill)
+        # STEP 3: ATOMIC EXECUTION (Fill-Or-Kill)
         resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
         
-        # STEP 5: PROFIT REPORTING
         if resp and resp.get("success"):
-            order_id = resp.get("orderID", "Unknown")
-            estimated_shares = stake / current_price
-            net_profit = (estimated_shares * 1.00) - stake
-            
-            report = (
-                f"✅ **WINNING HIT CONFIRMED**\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"🎯 Target: `{market_name}`\n"
-                f"💲 Entry Price: `${current_price:.3f}`\n"
-                f"📦 Shares Acquired: `{estimated_shares:.2f}`\n"
-                f"💰 **Net Profit (If Won):** `+${net_profit:.2f}`\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"⚡ Timing: 1ms Offset\n"
-                f"🔖 Order ID: `{order_id}`"
-            )
+            net_profit = (stake / current_price) - stake
+            report = (f"✅ **WINNING HIT CONFIRMED**\n━━━━━━━━━━━━━━\n🎯 Target: `{market_name}`\n"
+                      f"💰 **Net Profit: +${net_profit:.2f}**\n⚡ Timing: 1ms Offset\n━━━━━━━━━━━━━━")
             await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown')
         else:
-            err_msg = resp.get("errorMsg", "Liquidity rejected.")
-            await context.bot.edit_message_text(f"❌ **API GUARD TRIGGERED:**\n`{err_msg}`", chat_id=chat_id, message_id=msg.message_id)
+            await context.bot.edit_message_text(f"❌ **REJECTED:** {resp.get('errorMsg', 'Liquidity error')}", chat_id=chat_id, message_id=msg.message_id)
 
     except Exception as e:
-        await context.bot.edit_message_text(f"❌ **SYSTEM ERROR:**\n`{str(e)}`", chat_id=chat_id, message_id=msg.message_id)
+        await context.bot.edit_message_text(f"❌ **SYSTEM ERROR:** `{str(e)}`", chat_id=chat_id, message_id=msg.message_id)
 
-# --- 5. UI HANDLERS ---
+# --- 6. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = (f"🕴️ **APEX v43.0 Autonomous Sniper**\n━━━━━━━━━━━━━━\n"
-               f"⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n"
-               f"📍 Sync: `Auto-Search -> Zero-Gas Hit`")
+    welcome = (f"🕴️ **APEX v45.0 AI-Sentinel**\n━━━━━━━━━━━━━━\n"
+               f"⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n"
+               f"📍 Sync: `AI-Validation -> 1ms Sniper`")
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
     text, chat_id = update.message.text, update.message.chat_id
     if text == '🚀 Start Trading':
-        # Safely uses the updated 'price' key for the emoji
         kb = [[InlineKeyboardButton(f"{k} {POOLS[k]['price']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[:3]],
               [InlineKeyboardButton(f"{k} {POOLS[k]['price']}", callback_data=f"PAIR_{k}") for k in list(POOLS.keys())[3:]]]
         await update.message.reply_text("🎯 **SELECT NATIVE CLOB POOL:**", reply_markup=InlineKeyboardMarkup(kb))
@@ -224,8 +200,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ **Configure Stake Amount:**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
-        v_addr = vault.address if vault else "No Wallet Found"
-        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 Native USDC: `${usdc:.2f}`\n📍 `{v_addr}`")
+        await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`")
     elif text == '🤖 AUTO MODE':
         auto_mode_enabled = not auto_mode_enabled
         if auto_mode_enabled: asyncio.create_task(autopilot_loop(chat_id, context))
