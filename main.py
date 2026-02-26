@@ -8,65 +8,65 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# --- 1. CORE CONFIG & ELITE DESIGN ASSETS ---
+# --- 1. CORE CONFIG & ELITE DESIGN ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# THE GLOBAL BUFFER (Ensures 100% Instant Options)
-NEURAL_STRIKE_CACHE = []
+# ULTRA-SPEED RAM BUFFER
+PRELOADED_WINNERS = []
 
-# ELITE BLOCK-SHADED LOGOS
+# ELITE CENTERED ASCII ASSETS
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝   ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v94.0</code>
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v95.0</code>
 """
 
 WIN_LOGO = """
-<code>██╗   ██╗ ██████╗ ██╗   ██╗    ██╗    ██╗██╗███╗   ██╗
-╚██╗ ██╔╝██╔═══██╗██║   ██║    ██║    ██║██║████╗  ██║
- ╚████╔╝ ██║   ██║██║   ██║    ██║ █╗ ██║██║██╔██╗ ██║
-  ╚██╔╝  ██║   ██║██║   ██║    ██║███╗██║██║██║╚██╗██║
-   ██║   ╚██████╔╝╚██████╔╝    ╚███╔███╔╝██║██║ ╚████║
-   ╚═╝    ╚═════╝  ╚═════╝      ╚══╝╚══╝ ╚═╝╚═╝  ╚════╝
+<code>          ██╗   ██╗ ██████╗ ██╗   ██╗
+          ╚██╗ ██╔╝██╔═══██╗██║   ██║
+           ╚████╔╝ ██║   ██║██║   ██║
+            ╚██╔╝  ██║   ██║██║   ██║
+             ██║   ╚██████╔╝╚██████╔╝
+             ╚═╝    ╚═════╝  ╚═════╝
 
-        .-----------------.
-       |   STRIKE RECEIVED   |
-       |     LOAD X2 CAD     |
-        '._==_==_=_.'
-     .-\\:      /-.
-    | (|:.     |) |
-     '-|:.     |-'
-       \\::.    /
-        '::. .'
-          ) (
-        _.' '._
-       `-------`</code>
+               .-----------------.
+              |   STRIKE RECEIVED   |
+              |     LOAD X2 CAD     |
+               '._==_==_=_.'
+            .-\\:      /-.
+           | (|:.     |) |
+            '-|:.     |-'
+              \\::.    /
+               '::. .'
+                 ) (
+               _.' '._
+              `-------`</code>
 """
 
 LOSE_LOGO = """
-<code>██╗   ██╗ ██████╗ ██╗   ██╗    ██╗      ██████╗ ███████╗███████╗
-╚██╗ ██╔╝██╔═══██╗██║   ██║    ██║     ██╔═══██╗██╔════╝██╔════╝
- ╚████╔╝ ██║   ██║██║   ██║    ██║     ██║   ██║███████╗█████╗  
-  ╚██╔╝  ██║   ██║██║   ██║    ██║     ██║   ██║╚════██║██╔══╝  
-   ██║   ╚██████╔╝╚██████╔╝    ███████╗╚██████╔╝███████║███████╗
-   ╚═╝    ╚═════╝  ╚═════╝     ╚══════╝ ╚═════╝ ╚══════╝╚══════╝
+<code>          ██╗      ██████╗ ███████╗███████╗
+          ██║     ██╔═══██╗██╔════╝██╔════╝
+          ██║     ██║   ██║███████╗█████╗  
+          ██║     ██║   ██║╚════██║██╔══╝  
+          ███████╗╚██████╔╝███████║███████╗
+          ╚══════╝ ╚═════╝ ╚══════╝╚══════╝
 
-             ▄██████████▄
-            ██████████████
-            ██  ██████  ██
-            ██████████████
-              ██████████
-              ██  ██  ██
-              ▀▀  ▀▀  ▀▀
-          [SYSTEM_REVERTED]</code>
+                  ▄██████████▄
+                 ██████████████
+                 ██  ██████  ██
+                 ██████████████
+                   ██████████
+                   ██  ██  ██
+                   ▀▀  ▀▀  ▀▀
+               [SYSTEM_REVERTED]</code>
 """
 
-# --- 2. THE HARDENED CORE & AUTH ---
+# --- 2. HARDENED CONNECTION & AUTH ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -76,12 +76,13 @@ def get_vault():
     except: return None
 
 vault = get_vault()
-if not vault: exit("🛑 ERROR: WALLET_SEED INVALID")
 
 def get_w3():
-    for rpc in [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]:
+    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
+    for url in rpc_list:
+        if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 10}))
+            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
@@ -94,39 +95,37 @@ try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
-except: exit("🛑 ERROR: Missing py-clob-client")
+except: exit("Missing SDK: pip install py-clob-client")
 
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 3. DYNAMIC BACKGROUND HARVESTER (FIXES HANGING) ---
+# --- 3. DYNAMIC BACKGROUND HARVESTER (THE FIX) ---
 
-async def background_neural_harvester():
-    """Eternally populates RAM with bets so 'Start Sniper' is INSTANT."""
-    global NEURAL_STRIKE_CACHE
+async def background_scour_loop():
+    """Recursively populates RAM so 'Start Sniper' works 100% of the time."""
+    global PRELOADED_WINNERS
     while True:
         try:
-            # Scrape top 40 crypto markets directly from CLOB
             raw = await asyncio.to_thread(clob_client.get_markets)
             pool = [m for m in raw if m.get('active') and "price" in m['question'].lower()]
             if not pool: pool = [m for m in raw if m.get('active')][:20]
             
             market_data = [{"q": m['question'], "id": m['clobTokenIds']} for m in pool[:40]]
-            prompt = (f"Analyze these 40 markets: {json.dumps(market_data)}. "
-                      "Pick 8 high-conf short-term winners. Return JSON: "
-                      "[{'name': 'BTC', 'side': 'UP/DOWN', 'q': 'Short Question', 'token_id': 'ID'}]")
+            prompt = (f"Analyze: {json.dumps(market_data)}. Pick 8 crypto winners for the next 60m. "
+                      "Return JSON: [{'name': 'BTC', 'side': 'UP/DOWN', 'q': 'Short Question', 'token_id': 'ID'}]")
             
             resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt, config={'response_mime_type': 'application/json'})
             winners = json.loads(resp.text)
             if winners:
-                NEURAL_STRIKE_CACHE = winners
-                print(f"⚡ RAM BUFFER LOADED: {len(NEURAL_STRIKE_CACHE)} Paths Ready.")
+                PRELOADED_WINNERS = winners
+                print(f"⚡ RAM BUFFER HOT: {len(PRELOADED_WINNERS)} Paths Pre-Loaded.")
         except: pass
-        await asyncio.sleep(40)
+        await asyncio.sleep(45)
 
-# --- 4. ATOMIC STRIKE & UI ---
+# --- 4. ATOMIC EXECUTION & STUNNING UI ---
 
-async def execute_strike(context, chat_id, bet):
+async def execute_atomic_hit(context, chat_id, bet):
     stake = float(context.user_data.get('stake', 50))
     msg = await context.bot.send_message(chat_id, "<code>⚡ FIRING_ATOMIC_GAUNTLET...</code>", parse_mode='HTML')
     try:
@@ -143,35 +142,45 @@ async def execute_strike(context, chat_id, bet):
             await context.bot.send_message(chat_id, f"✅ <b>VICTORY:</b> <code>${mid:.3f}</code>", parse_mode='HTML')
         else:
             await context.bot.send_message(chat_id, f"{LOSE_LOGO}", parse_mode='HTML')
+            await context.bot.send_message(chat_id, "🛡️ <b>GUARDED: MATRIX REVERT</b>", parse_mode='HTML')
     except:
         await context.bot.send_message(chat_id, "☢️ <b>DESYNC_ERROR</b>")
 
+# --- 5. INTERFACE ---
+
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
-    await update.message.reply_text(f"{LOGO}\n<b>OLYMPUS ENGINE: ONLINE.</b>\nREADY_P1", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>P1_CONNECTED. READY TO STRIKE.</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text == '⚔️ START SNIPER':
         # 100% INSTANT: Pulling from RAM, not the internet
-        if not NEURAL_STRIKE_CACHE:
-            await background_neural_harvester() # Emergency forced sync
+        if not PRELOADED_WINNERS:
+            status = await update.message.reply_text("📡 <b>INITIALIZING NEURAL LINK...</b>")
+            await asyncio.sleep(2)
+            if not PRELOADED_WINNERS: return await status.edit_text("❌ Matrix Cold. Retry in 5s.")
         
-        kb = [[InlineKeyboardButton(f"🎯 {p['name']} | {p['side']} | VERIFIED", callback_data=f"HIT_{i}")] for i, p in enumerate(NEURAL_STRIKE_CACHE)]
-        context.user_data['active_paths'] = NEURAL_STRIKE_CACHE
+        kb = [[InlineKeyboardButton(f"🎯 {p['name']} | {p['side']} | VERIFIED", callback_data=f"HIT_{i}")] for i, p in enumerate(PRELOADED_WINNERS)]
+        context.user_data['paths'] = PRELOADED_WINNERS
         await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif update.message.text == '💳 VAULT':
+        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        report = f"<code>┌── VAULT_AUDIT ──┐</code>\n  ⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n📍 ID: <code>{vault.address[:10]}...</code>"
+        await update.message.reply_text(report, parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
     if "HIT_" in query.data:
         idx = int(query.data.split("_")[1])
-        await execute_strike(context, query.message.chat_id, context.user_data['active_paths'][idx])
+        await execute_atomic_hit(context, query.message.chat_id, context.user_data['paths'][idx])
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     
-    # Start background task IMMEDIATELY
+    # Start the Harvester thread IMMEDIATELY
     loop = asyncio.get_event_loop()
-    loop.create_task(background_neural_harvester())
+    loop.create_task(background_scour_loop())
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
