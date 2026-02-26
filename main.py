@@ -40,6 +40,7 @@ active_w3 = w3 if w3 else util_w3
 Account.enable_unaudited_hdwallet_features()
 
 def get_vault():
+    """Generates the secure Vault object from the Seed/Private Key."""
     seed = os.getenv("WALLET_SEED")
     if not seed: return None
     try:
@@ -62,34 +63,41 @@ async def fetch_balances(address):
         return active_w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
     except: return Decimal('0'), Decimal('0')
 
-# --- 2. OFFICIAL POLYMARKET CLOB SDK ---
+# --- 2. OFFICIAL POLYMARKET CLOB SDK (AUTO-DERIVATION) ---
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
 except ImportError:
-    print("CRITICAL ERROR: py-clob-client is not installed.")
+    print("CRITICAL ERROR: py-clob-client is not installed. Run 'pip install py-clob-client'")
     exit(1)
 
-FUNDER = os.getenv("FUNDER_ADDRESS", vault.address if vault else "")
 clob_client = None
 
-if vault and FUNDER:
-    clob_client = ClobClient(
-        host="https://clob.polymarket.com", 
-        key=vault.key.hex(), 
-        chain_id=137, 
-        signature_type=0, 
-        funder=FUNDER
-    )
+if vault:
+    # 💥 THE FIX: Auto-derive everything directly from the Vault
+    derived_private_key = vault.key.hex()  # Forces correct hex format
+    derived_funder = vault.address         # Automatically extracts public address
+    
+    print(f"🚀 Booting Vault Signature for: {derived_funder}")
+    
     try:
+        clob_client = ClobClient(
+            host="https://clob.polymarket.com", 
+            key=derived_private_key, 
+            chain_id=137, 
+            signature_type=0, 
+            funder=derived_funder
+        )
+        # Establish L1 -> L2 credentials automatically
         clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
         print("✅ CLOB API Authenticated Successfully")
     except Exception as e:
         print(f"❌ CLOB API Auth Failed: {e}")
+else:
+    print("❌ CRITICAL: Could not load Vault. Check WALLET_SEED in .env")
 
 # --- 3. AUTO-FETCH MARKET MAPPING ---
-# Merged your UI styling with the Slug API logic
 POOLS = {
     "BTC":   {"slug": "bitcoin-price-above-65000-feb-26", "color": "🟠"},
     "ETH":   {"slug": "ethereum-price-above-3000-feb-26", "color": "🔵"},
@@ -118,13 +126,13 @@ def get_live_token_id(slug, side):
 # --- 4. THE SIMULTANEOUS PROFIT-SNIPER ENGINE ---
 async def run_api_execution(context, chat_id, side, asset_override=None):
     if not clob_client:
-        return await context.bot.send_message(chat_id, "❌ Error: CLOB Client offline.")
+        return await context.bot.send_message(chat_id, "❌ Error: CLOB Client offline. Check console logs.")
 
     pool_key = asset_override or context.user_data.get('pair', 'BTC')
     stake = float(context.user_data.get('stake', 50))
     slug = POOLS[pool_key]["slug"]
 
-    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v40.0: Acquiring Target on {pool_key}...**")
+    msg = await context.bot.send_message(chat_id, f"🛰️ **APEX v42.0: Acquiring Target on {pool_key}...**")
     
     token_id = await asyncio.to_thread(get_live_token_id, slug, side)
     
@@ -175,11 +183,11 @@ async def run_api_execution(context, chat_id, side, asset_override=None):
     except Exception as e:
         await context.bot.edit_message_text(f"❌ **SYSTEM ERROR:**\n`{str(e)}`", chat_id=chat_id, message_id=msg.message_id)
 
-# --- 5. UI HANDLERS (Merged from your code) ---
+# --- 5. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = (f"🕴️ **APEX v40.0 Profit-Sniper**\n━━━━━━━━━━━━━━\n"
+    welcome = (f"🕴️ **APEX v42.0 API-Sniper**\n━━━━━━━━━━━━━━\n"
                f"⛽ POL: `{pol:.4f}`\n💵 Native USDC: `${usdc:.2f}`\n"
                f"📍 Sync: `Zero-Gas FOK Matching`")
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
@@ -194,7 +202,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure Stake (Native USDC):**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("⚙️ **Configure Stake Amount (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address) if vault else (0, 0)
         v_addr = vault.address if vault else "No Wallet Found"
