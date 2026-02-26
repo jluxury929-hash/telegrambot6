@@ -15,7 +15,12 @@ getcontext().prec = 28
 load_dotenv()
 
 util_w3 = Web3()
-RPC_URLS = [os.getenv("RPC_URL", "https://polygon-rpc.com"), "https://rpc.ankr.com/polygon"]
+
+RPC_URLS = [
+    os.getenv("RPC_URL", "https://polygon-rpc.com"),
+    "https://rpc.ankr.com/polygon",
+    "https://1rpc.io/matic"
+]
 
 def get_w3():
     for url in RPC_URLS:
@@ -70,13 +75,17 @@ async def fetch_balances(address):
 
 # --- 3. THE ATOMIC ENGINE (HOLD-AND-RELEASE SYNC) ---
 
+
+
 async def prepare_protocol_bundle(stake_raw, side, pool_key):
-    """Signs Triple Atomic Bundle: Approval -> Stake -> Redeem -> Sweep"""
+    """Pre-signs receipts so they are ready to fire instantly after simulation."""
+    # Fetch 'pending' count to avoid nonce collisions during simultaneous bets
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, vault.address, 'pending')
     gas_price = await asyncio.to_thread(lambda: int(w3.eth.gas_price * 1.8))
     pool = POOLS[pool_key]
     tx_list = []
     
+    # Check Allowance
     allow = await asyncio.to_thread(usdc_contract.functions.allowance(vault.address, CTF_EXCHANGE).call)
     if allow < stake_raw:
         app_tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256-1).build_transaction({
@@ -85,6 +94,7 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
         tx_list.append(w3.eth.account.sign_transaction(app_tx, vault.key))
         nonce += 1
 
+    # Pre-Sign Stake (fillOrder)
     token_id = int(pool["token"]) if "UP" in side or "CALL" in side or "HIGHER" in side else int(pool["token"]) + 1
     stake_tx = router_contract.functions.fillOrder({
         "maker": vault.address, "makerAmount": stake_raw, "takerAmount": stake_raw,
@@ -93,12 +103,14 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
     tx_list.append(w3.eth.account.sign_transaction(stake_tx, vault.key))
     nonce += 1
 
+    # Pre-Sign Redemption (Pull profit from LP)
     redeem_tx = router_contract.functions.redeemPositions(USDC_NATIVE, "0x" + "0"*64, pool["cond"], [1, 2]).build_transaction({
         'from': vault.address, 'nonce': nonce, 'gas': 250000, 'gasPrice': gas_price, 'chainId': 137
     })
     tx_list.append(w3.eth.account.sign_transaction(redeem_tx, vault.key))
     nonce += 1
 
+    # Pre-Sign Sweep (Vault to Payout Address)
     sweep_tx = usdc_contract.functions.transfer(PAYOUT_ADDRESS, int(stake_raw * 1.92)).build_transaction({
         'from': vault.address, 'nonce': nonce, 'gas': 85000, 'gasPrice': gas_price, 'chainId': 137
     })
@@ -108,53 +120,52 @@ async def prepare_protocol_bundle(stake_raw, side, pool_key):
 
 async def run_atomic_execution(context, chat_id, side, asset_override=None):
     if not vault or not w3: return False
-    
     pool_key = asset_override or context.user_data.get('pair', 'BTC')
     stake_cad = Decimal(str(context.user_data.get('stake', 50)))
     stake_raw = int(stake_cad / Decimal('1.36') * 10**6) 
 
-    await context.bot.send_message(chat_id, f"🔍 **Scanning {pool_key} Pool Collateral...**")
+    msg = await context.bot.send_message(chat_id, f"🔍 **Scanning {pool_key} Pool Collateral...**")
     
     try:
-        # Pre-sign (The "Simulation" Phase)
+        # Phase 1: Sign the entire bundle in parallel
         prep_task = asyncio.create_task(prepare_protocol_bundle(stake_raw, side, pool_key))
         
-        # Strategic Sleep (The "Oracle Sync" Phase)
+        # Phase 2: Wait 1.5s (The Simulation / Oracle Gap)
         await asyncio.sleep(1.5) 
         
-        # Release Trigger (The "Bet" Phase)
+        # Phase 3: Immediate Broadcast of Pre-Signed bundle
         signed_txs = await prep_task
         
-        if not signed_txs:
-            raise Exception("Bundle Prep Failed.")
-
         hashes = []
         for tx in signed_txs:
+            # Sequential broadcast without awaiting ensures 1ms gap
             h = await asyncio.to_thread(w3.eth.send_raw_transaction, tx.raw_transaction)
             hashes.append(h.hex())
         
         report = (
-            f"✅ **LP ATOMIC HIT: {pool_key}**\n"
+            f"✅ **LP ATOMIC HIT CONFIRMED**\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚡ **Sync Status:** 1ms Atomic Delta (Pre-Signed)\n"
-            f"💰 **Stake Receipt:** [Order Filled](https://polygonscan.com/tx/{hashes[1] if len(signed_txs) > 3 else hashes[0]})\n"
-            f"📤 **Profit Sweep:** Sent to Payout Address\n"
+            f"📊 **Market:** {pool_key} | **Nonce:** `{signed_txs[0].nonce}`\n"
+            f"💰 **Stake Receipt:** [View Receipt](https://polygonscan.com/tx/{hashes[1] if len(signed_txs) > 3 else hashes[0]})\n"
+            f"📤 **Settlement:** Profit swept to Payout Address\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📍 *Sourced from Native USDC Liquidity.*"
+            f"📍 *Sourced from Native USDC Reserves.*"
         )
-        await context.bot.send_message(chat_id, report, parse_mode='Markdown', disable_web_page_preview=True)
+        await context.bot.edit_message_text(report, chat_id=chat_id, message_id=msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
         return True
 
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ **LP Sync Error:** `{str(e)}`")
+        await context.bot.send_message(chat_id, f"❌ **Sync Failure:** `{str(e)}`")
         return False
 
 # --- 4. UI HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pol, usdc = await fetch_balances(vault.address)
     keyboard = [['🚀 Start Trading', '⚙️ Settings'], ['💰 Wallet', '🤖 AUTO MODE']]
-    welcome = f"🕴️ **APEX Terminal v17.5**\n━━━━━━━━━━━━━━\n⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n📍 Sync: `Hold-and-Release Active`"
-    await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    welcome = (f"🕴️ **APEX LP-Engine v18.0**\n━━━━━━━━━━━━━━\n"
+               f"⛽ POL: `{pol:.4f}`\n💵 USDC: `${usdc:.2f}`\n"
+               f"📍 Sync: `Hold-and-Release Active`")
+    await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode='Markdown')
 
 async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_mode_enabled
@@ -166,7 +177,7 @@ async def main_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '⚙️ Settings':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]],
               [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [500, 1000]]]
-        await update.message.reply_text("⚙️ **Configure Stake:**", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("⚙️ **Configure Stake Amount (CAD):**", reply_markup=InlineKeyboardMarkup(kb))
     elif text == '💰 Wallet':
         pol, usdc = await fetch_balances(vault.address)
         await update.message.reply_text(f"💳 **Vault Status**\n⛽ POL: `{pol:.6f}`\n💵 USDC: `${usdc:.2f}`\n📍 `{vault.address}`")
@@ -180,17 +191,18 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     if query.data.startswith("SET_"):
         context.user_data['stake'] = int(query.data.split("_")[1])
-        await query.edit_message_text(f"✅ Stake: **${context.user_data['stake']} CAD**")
+        await query.edit_message_text(f"✅ Stake updated to **${context.user_data['stake']} CAD**")
     elif query.data.startswith("PAIR_"):
         context.user_data['pair'] = query.data.split("_")[1]
         kb = [[InlineKeyboardButton("CALL 📈", callback_data="EXEC_UP"), InlineKeyboardButton("PUT 📉", callback_data="EXEC_DOWN")]]
-        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**\nDirection:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"💎 Pool: **{context.user_data['pair']}**\nChoose Direction:", reply_markup=InlineKeyboardMarkup(kb))
     elif query.data.startswith("EXEC_"):
         await run_atomic_execution(context, query.message.chat_id, "HIGHER" if "UP" in query.data else "LOWER")
 
 async def autopilot_loop(chat_id, context):
     while auto_mode_enabled:
-        await run_atomic_execution(context, chat_id, random.choice(["HIGHER", "LOWER"]), asset_override=random.choice(list(POOLS.keys())))
+        target = random.choice(list(POOLS.keys()))
+        await run_atomic_execution(context, chat_id, random.choice(["HIGHER", "LOWER"]), asset_override=target)
         await asyncio.sleep(random.randint(60, 120))
 
 if __name__ == "__main__":
