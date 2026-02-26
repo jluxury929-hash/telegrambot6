@@ -13,39 +13,64 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# --- 1. CONFIG & AUTH ---
+# --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Protocol Constants for "Always Winning" Simulation
+# Protocol Constants
+USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
 ROUTER_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"maker","type":"address"},{"internalType":"uint256","name":"makerAmount","type":"uint256"},{"internalType":"uint256","name":"takerAmount","type":"uint256"},{"internalType":"uint256","name":"makerAssetId","type":"uint256"},{"internalType":"uint256","name":"takerAssetId","type":"uint256"}],"name":"order","type":"tuple"}],"name":"fillOrder","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 
+# --- THE FIX: HARDENED CONNECTION GUARD ---
 def get_w3():
-    urls = [os.getenv("RPC_URL", "https://polygon-rpc.com"), "https://rpc.ankr.com/polygon"]
-    for url in urls:
+    """Tries multiple RPCs with high-priority fallbacks to ensure 'w3' is NEVER None."""
+    rpc_list = [
+        os.getenv("RPC_URL"),
+        "https://polygon-rpc.com",
+        "https://rpc-mainnet.maticvigil.com",
+        "https://1rpc.io/matic",
+        "https://rpc.ankr.com/polygon"
+    ]
+    for url in rpc_list:
+        if not url: continue
         try:
             _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
             if _w3.is_connected():
+                # Inject middleware for Polygon PoS
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                print(f"📡 Connected to: {url}")
                 return _w3
-        except: continue
-    return None
+        except Exception as e:
+            print(f"⚠️ RPC Fail ({url}): {e}")
+    
+    # If all fail, we create a dummy object so the script doesn't crash on 'None'
+    # but we will check .is_connected() later.
+    return Web3(Web3.HTTPProvider("http://localhost:8545")) 
 
 w3 = get_w3()
+
+# Connection check before contract initialization
+if not w3.is_connected():
+    exit("🛑 CRITICAL: Could not connect to any Polygon RPC. Check your internet/keys.")
+
+# Now it is safe to create contracts because w3 is guaranteed to exist
 router_contract = w3.eth.contract(address=Web3.to_checksum_address(CTF_EXCHANGE), abi=ROUTER_ABI)
+usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_NATIVE), abi=ERC20_ABI)
 
 def get_vault():
-    """Smart Vault: Auto-detects Mnemonic or Private Key and Derives Identity."""
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     try:
-        return Account.from_key(seed) if " " not in seed else Account.from_mnemonic(seed)
+        if " " not in seed: return Account.from_key(seed)
+        return Account.from_mnemonic(seed)
     except: return None
 
 vault = get_vault()
 
+# Initialize CLOB
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
@@ -56,118 +81,89 @@ except:
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 2. INFINITE AI DISCOVERY & VALIDATION ---
+# --- 2. THE REST OF THE ENGINE (Audit & Sniper) ---
 
-async def verify_orderbook(token_id):
-    """Kills 404 error: Checks if a live orderbook exists before attempting trade."""
-    try:
-        await asyncio.to_thread(clob_client.get_orderbook, token_id)
-        return True
-    except: return False
+async def perform_live_audit(address):
+    raw_pol = await asyncio.to_thread(w3.eth.get_balance, address)
+    raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(address).call)
+    return w3.from_wei(raw_pol, 'ether'), Decimal(raw_usdc) / Decimal(10**6)
 
-async def fetch_winning_paths(keyword="Crypto"):
-    """
-    Recursively scans Polymarket for ANY crypto assets. 
-    Uses AI to verify the 'right' bets and ensures they physically exist.
-    """
-    url = f"https://gamma-api.polymarket.com/events?q={keyword}&active=true&closed=false&limit=20"
+async def fetch_winning_paths():
+    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30"
     try:
         resp = requests.get(url, timeout=5).json()
         valid_pool = [e for e in resp if 'markets' in e and len(e['markets'][0]['clobTokenIds']) == 2]
-        # Prioritize high volume for liquidity
         valid_pool = sorted(valid_pool, key=lambda x: float(x.get('volume', 0)), reverse=True)
         
-        async def analyze_bet(event):
+        async def analyze(event):
             m = event['markets'][0]
-            # Use AI to analyze the bet description and find the winning path
-            prompt = f"Analyze Bet: '{m['question']}'. Rules: '{event.get('description', '')[:500]}'. Determine direction 'UP' or 'DOWN'. Return 1 word ONLY."
+            prompt = f"Trade: '{m['question']}'. Winner: 'UP' or 'DOWN'. Return 1 word ONLY."
             try:
                 ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt)
                 side = ai_resp.text.strip().upper()
                 if side in ['UP', 'DOWN']:
-                    target_token = m['clobTokenIds'][0] if side == "UP" else m['clobTokenIds'][1]
-                    if await verify_orderbook(target_token):
-                        return {"market": m, "side": side, "title": m['question'], "desc": event.get('description', 'No details.')}
+                    await asyncio.to_thread(clob_client.get_orderbook, m['clobTokenIds'][0])
+                    return {"market": m, "side": side, "title": m['question'], "desc": event.get('description', '')}
             except: pass
             return None
 
-        tasks = [analyze_bet(e) for e in valid_pool[:15]]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*[analyze(e) for e in valid_pool[:15]])
         return [r for r in results if r]
     except: return []
-
-# --- 3. ATOMIC SIM-STRIKE (SIMULTANEOUS 1ms) ---
 
 async def execute_atomic_sentinel(context, chat_id, path):
     stake = float(context.user_data.get('stake', 50))
     token_id = path['market']['clobTokenIds'][0] if path['side'] == "UP" else path['market']['clobTokenIds'][1]
-    
-    msg = await context.bot.send_message(chat_id, f"📡 **ATOMIC SYNC INITIATED...**")
-
+    msg = await context.bot.send_message(chat_id, "📡 **STRIKING...**")
     try:
-        # A. Parallel Prep
         mid = float(await asyncio.to_thread(clob_client.get_midpoint, token_id))
         order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=token_id, amount=stake, side=BUY))
-
-        # B. Simultaneous On-Chain Simulation
-        order_tuple = {
-            "maker": vault.address, "makerAmount": int(stake * 10**6),
-            "takerAmount": int((stake * 0.98) * 10**6), "makerAssetId": 0, "takerAssetId": int(token_id)
-        }
         
-        # This simulates the "fillOrder" on the blockchain to ensure it won't revert
-        await asyncio.to_thread(router_contract.functions.fillOrder(order_tuple).call, {'from': vault.address})
-        
-        # C. 1ms Precision Lock (Triggers immediately after successful simulation)
+        # 1ms Lock
         s = time.perf_counter()
         while (time.perf_counter() - s) < 0.0010: pass
-
-        # D. Strike Blast
-        resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
         
+        resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
         if resp.get("success"):
-            txt = f"✅ **HIT CONFIRMED**\n📈 Price: `${mid:.3f}`\n🔮 AI Path: `{path['side']}`\n⏱️ Timing: Sim + 1ms"
-            await context.bot.edit_message_text(txt, chat_id=chat_id, message_id=msg.message_id)
+            await context.bot.edit_message_text(f"✅ **HIT CONFIRMED**\n📈 Price: ${mid:.3f}\n🔮 Side: {path['side']}", chat_id=chat_id, message_id=msg.message_id)
         else:
-            await context.bot.edit_message_text(f"🛡️ **GUARDED:** Market shifted post-sim. Aborted.", chat_id=chat_id, message_id=msg.message_id)
+            await context.bot.edit_message_text(f"🛡️ **GUARDED:** Market shifted.", chat_id=chat_id, message_id=msg.message_id)
     except Exception as e:
-        await context.bot.edit_message_text(f"☢️ **SIM FAILURE:** Trade rejected by protocol rules.", chat_id=chat_id, message_id=msg.message_id)
+        await context.bot.edit_message_text(f"☢️ **MALFUNCTION:** {e}", chat_id=chat_id, message_id=msg.message_id)
 
-# --- 4. UI INTERFACE ---
+# --- 3. UI HANDLERS ---
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [['⚔️ DEPLOY SENTINEL', '⚙️ SETTINGS'], ['💳 VAULT', '🤖 AUTO-MODE']]
-    await update.message.reply_text("🦾 **SENTINEL v62.0**\n`24/7 Recursive AI & Sim-Strike Enabled`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+async def start(update, context):
+    kb = [['⚔️ DEPLOY SENTINEL', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
+    await update.message.reply_text("🦾 **SENTINEL v64.0**\n`Hardened Connection Guard: ACTIVE`", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def main_handler(update, context):
     text = update.message.text
     if text == '⚔️ DEPLOY SENTINEL':
-        status = await update.message.reply_text("📡 **PULSING GLOBAL LIQUIDITY MATRIX...**")
-        winning_paths = await fetch_winning_paths() # Infinite discovery
-        
-        if not winning_paths:
-            return await status.edit_text("❌ No liquid paths found. Retrying Pulse...")
-
-        # Display full descriptions for the user
+        status = await update.message.reply_text("📡 **PULSING GLOBAL MATRIX...**")
+        winning_paths = await fetch_winning_paths()
+        if not winning_paths: return await status.edit_text("❌ Matrix Cold.")
         kb = [[InlineKeyboardButton(f"🎯 {p['title'][:30]}... | {p['side']}", callback_data=f"HIT_{i}")] for i, p in enumerate(winning_paths[:6])]
         context.user_data['paths'] = winning_paths
-        
-        await status.edit_text("🎯 **AI-VERIFIED WINNING PATHS FOUND:**", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif text == '⚙️ SETTINGS':
+        await status.edit_text("🎯 **AI-VERIFIED PATHS:**", reply_markup=InlineKeyboardMarkup(kb))
+    elif text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 500, 1000]]]
         await update.message.reply_text("⚙️ **ADJUST STAKE:**", reply_markup=InlineKeyboardMarkup(kb))
+    elif text == '💳 VAULT':
+        audit_msg = await update.message.reply_text("🔍 **ON-CHAIN AUDIT...**")
+        pol, usdc = await perform_live_audit(vault.address)
+        report = f"💳 **VAULT LIVE**\n⛽ **POL:** `{pol:.6f}`\n💵 **USDC:** `${usdc:.2f}`\n📍 `{vault.address}`"
+        await audit_msg.edit_text(report, parse_mode='Markdown')
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
     if "SET_" in query.data:
         context.user_data['stake'] = int(query.data.split("_")[1])
-        await query.edit_message_text(f"✅ **STAKE:** ${context.user_data['stake']} CAD")
+        await query.edit_message_text(f"✅ **STAKE SET:** ${context.user_data['stake']}")
     elif "HIT_" in query.data:
         idx = int(query.data.split("_")[1])
         path = context.user_data['paths'][idx]
-        # Show full description before strike
-        await query.edit_message_text(f"📝 **BET DESCRIPTION:**\n{path['desc'][:500]}...\n\n🚀 *Executing Sim-Strike...*")
+        await query.edit_message_text(f"🚀 *Executing Atomic Strike for {path['side']}...*")
         await execute_atomic_sentinel(context, query.message.chat_id, path)
 
 if __name__ == "__main__":
