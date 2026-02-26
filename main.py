@@ -8,24 +8,23 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# --- 1. CORE CONFIG & CENTERED ASCII LIBRARY ---
+# --- 1. CORE CONFIG & ELITE ASCII GALLERY ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 PRELOADED_WINNERS = []
 
-# THE ELITE LOGO (Solid Fill)
+# Institutional Logos (Centered & High-Density)
 LOGO_APEX = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝   ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v92.0</code>
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v93.0</code>
 """
 
-# THE CHAMPION'S REWARD (YOU WIN + TROPHY)
 WIN_LOGO = """
 <code>██╗   ██╗ ██████╗ ██╗   ██╗    ██╗    ██╗██╗███╗   ██╗
 ╚██╗ ██╔╝██╔═══██╗██║   ██║    ██║    ██║██║████╗  ██║
@@ -48,7 +47,6 @@ WIN_LOGO = """
        `-------`</code>
 """
 
-# THE FATAL REVERT (CENTERED YOU LOSE + CENTERED SKULL)
 LOSE_LOGO = """
 <code>██╗   ██╗ ██████╗ ██╗   ██╗    ██╗      ██████╗ ███████╗███████╗
 ╚██╗ ██╔╝██╔═══██╗██║   ██║    ██║     ██╔═══██╗██╔════╝██╔════╝
@@ -67,7 +65,31 @@ LOSE_LOGO = """
           [SYSTEM_REVERTED]</code>
 """
 
-# --- 2. THE RESILIENT CORE ---
+# --- 2. THE AUTH FIX (THE REMEDY) ---
+def get_vault():
+    """Detects if WALLET_SEED is a Hex Private Key or a Mnemonic Phrase."""
+    seed = os.getenv("WALLET_SEED", "").strip()
+    if not seed:
+        print("🛑 FATAL: WALLET_SEED not found in .env")
+        return None
+    
+    Account.enable_unaudited_hdwallet_features()
+    try:
+        # Check if it's a seed phrase (contains spaces)
+        if " " in seed:
+            return Account.from_mnemonic(seed)
+        else:
+            # Ensure it has the 0x prefix for from_key
+            if not seed.startswith("0x") and len(seed) == 64:
+                seed = "0x" + seed
+            return Account.from_key(seed)
+    except Exception as e:
+        print(f"🛑 AUTH ERROR: {e}")
+        return None
+
+vault = get_vault()
+if not vault: exit()
+
 def get_w3():
     rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
     for url in rpc_list:
@@ -81,8 +103,8 @@ def get_w3():
     return None
 
 w3 = get_w3()
-vault = Account.from_key(os.getenv("WALLET_SEED")) if os.getenv("WALLET_SEED") else None
 
+# OFFICIAL POLYMARKET CLOB SDK
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
@@ -92,7 +114,7 @@ except: exit("Missing SDK: pip install py-clob-client")
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 3. DYNAMIC HARVESTER (100% BET AVAILABILITY) ---
+# --- 3. DYNAMIC HARVESTER & STRIKE LOGIC ---
 async def background_scour_loop():
     global PRELOADED_WINNERS
     while True:
@@ -100,7 +122,6 @@ async def background_scour_loop():
             raw = await asyncio.to_thread(clob_client.get_markets)
             pool = [m for m in raw if m.get('active') and "price" in m['question'].lower()]
             if not pool: pool = [m for m in raw if m.get('active')][:20]
-            
             market_data = [{"q": m['question'], "id": m['clobTokenIds']} for m in pool[:40]]
             prompt = (f"Analyze: {json.dumps(market_data)}. Pick 8 crypto winners. Return JSON: "
                       "[{'name': 'BTC', 'side': 'UP/DOWN', 'q': 'Question', 'token_id': 'ID'}]")
@@ -110,29 +131,24 @@ async def background_scour_loop():
         except: pass
         await asyncio.sleep(45)
 
-# --- 4. ATOMIC STRIKE ENGINE ---
 async def execute_atomic_hit(context, chat_id, bet):
     stake = float(context.user_data.get('stake', 50))
     await context.bot.send_message(chat_id, "<code>⚡ FIRING_ATOMIC_GAUNTLET...</code>", parse_mode='HTML')
     try:
         mid = float(await asyncio.to_thread(clob_client.get_midpoint, bet['token_id']))
         order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=bet['token_id'], amount=stake, side=BUY))
-        
         s = time.perf_counter()
         while (time.perf_counter() - s) < 0.0010: pass
-        
         resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
         if resp.get("success"):
             await context.bot.send_message(chat_id, f"{WIN_LOGO}", parse_mode='HTML')
-            await context.bot.send_message(chat_id, f"✅ <b>VICTORY DETECTED</b>\n💰 CAD Load: <code>${stake*2}</code>", parse_mode='HTML')
+            await context.bot.send_message(chat_id, f"✅ <b>VICTORY DETECTED</b>", parse_mode='HTML')
         else:
-            # CENTERED YOU LOSE + CENTERED SKULL
             await context.bot.send_message(chat_id, f"{LOSE_LOGO}", parse_mode='HTML')
-            await context.bot.send_message(chat_id, "🛡️ <b>GUARDED: MATRIX REVERT</b>", parse_mode='HTML')
     except:
         await context.bot.send_message(chat_id, "☢️ <b>DESYNC</b>")
 
-# --- 5. INTERFACE ---
+# --- 4. INTERFACE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🤖 AUTO-MODE']]
     await update.message.reply_text(f"{LOGO_APEX}\n<b>P1_CONNECTED. READY TO STRIKE.</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
