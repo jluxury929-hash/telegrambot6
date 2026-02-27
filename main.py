@@ -6,41 +6,55 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from google import genai
 
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
+ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# THE PROXY INJECTION (Essential for US/Asia locations)
-PROXY_URL = os.getenv("PROXY_URL")
-if PROXY_URL:
-    os.environ['HTTP_PROXY'] = PROXY_URL
-    os.environ['HTTPS_PROXY'] = PROXY_URL
+# THE LOGO
+LOGO = """
+<code>█████╗ ██████╗ ███████╗██╗  ██╗
+██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
+███████║██████╔╝█████╗    ╚███╔╝
+██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
+██║  ██║██║      ███████╗██╔╝ ██╗
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v280-STABLE</code>
+"""
 
-OMNI_STRIKE_CACHE = []
+# --- 2. THE UNBREAKABLE HYDRA CONNECTION ---
+def get_hardened_w3():
+    """Forces connection. If this returns, w3 is guaranteed NOT to be None."""
+    rpc_list = [
+        os.getenv("RPC_URL"),
+        "https://polygon-rpc.com",
+        "https://rpc.ankr.com/polygon",
+        "https://polygon.llamarpc.com",
+        "https://1rpc.io/matic"
+    ]
+    print("📡 Probing Polygon Nodes...")
+    while True: # Recursive retry loop
+        for url in rpc_list:
+            if not url: continue
+            try:
+                _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+                if _w3.is_connected():
+                    _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                    print(f"✅ Pulse Detected: {url[:25]}...")
+                    return _w3
+            except: continue
+        print("☢️ RPC Pulse Flatline. Retrying in 5s...")
+        time.sleep(5)
 
-# --- 2. HYDRA RPC ENGINE ---
-def get_hydra_w3():
-    rpc_endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
-    for url in rpc_endpoints:
-        if not url: continue
-        try:
-            # Proxies={} ensures the RPC connection is direct and fast
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'proxies': {}, 'timeout': 10}))
-            if _w3.is_connected():
-                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                return _w3
-        except: continue
-    return None
+# Initialize w3 safely
+w3 = get_hardened_w3()
 
-w3 = get_hydra_w3()
-
-# NATIVE USDC ADDRESS (2026 Standard)
+# NATIVE USDC 2026 CONTRACTS
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-# CLOB EXCHANGE (Handles Native Transactions)
-CLOB_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+CLOB_EXCHANGE = Web3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
 
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
 # --- 3. AUTH & VAULT ---
@@ -58,27 +72,21 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-def init_clob():
-    """
-    POLYGON NATIVE USDC FIX:
-    Signature Type 1 (EOA) or 2 (Poly-Derived) for Native USDC settlement.
-    """
-    client = ClobClient(
-        host="https://clob.polymarket.com", 
-        key=vault.key.hex(), 
-        chain_id=137, 
-        signature_type=1, # Type 1 usually works best for EOA Native USDC
-        funder=vault.address
-    )
+def init_clob_auth():
+    """Auto-Derives API credentials from wallet signature."""
+    client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
     try:
-        # Derive credentials and verify the handshake
+        # Derive credentials and set them in the client headers
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
-    except: return client
+    except Exception as e:
+        print(f"Auth Derivation Block: {e}")
+        return client
 
-clob_client = init_clob()
+clob_client = init_clob_auth()
+OMNI_STRIKE_CACHE = []
 
-# --- 4. DATA HARVESTING ---
+# --- 4. DATA ENGINE & UI ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
     url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=25"
@@ -88,21 +96,19 @@ async def force_scour():
         for e in resp:
             m = e.get('markets', [])
             if m and m[0].get('clobTokenIds'):
-                tid = str(m[0]['clobTokenIds'][0]) # YES Token
                 pool.append({
                     "name": e.get('title')[:22], 
                     "q": m[0].get('question'), 
-                    "token_id": tid, 
+                    "token_id": str(m[0]['clobTokenIds'][0]), 
                     "price": float(m[0].get('lastTradePrice', 0.0))
                 })
         OMNI_STRIKE_CACHE = pool[:8]
         return True
     except: return False
 
-# --- 5. UI & ATOMIC STRIKE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text("<b>v275: NATIVE USDC READY</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>v280: HYDRA SECURED</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
@@ -114,32 +120,13 @@ async def main_handler(update, context):
     elif update.message.text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        allowance = await asyncio.to_thread(usdc_contract.functions.allowance(vault.address, CLOB_EXCHANGE).call)
-        report = (f"⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n"
-                  f"🪙 NATIVE USDC: <code>${raw_usdc/1e6:.2f}</code>\n"
-                  f"🛡️ NATIVE APPROVAL: {'✅' if allowance > 1e12 else '❌'}")
-        kb = [[InlineKeyboardButton("🔓 APPROVE NATIVE USDC", callback_data="APPROVE_USDC")]] if allowance < 1e12 else None
-        await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
+        await update.message.reply_text(f"⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n🪙 NATIVE USDC: <code>${raw_usdc/1e6:.2f}</code>", parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
-    
-    if query.data == "APPROVE_USDC":
-        await query.edit_message_text("⚡ <b>SIGNING NATIVE APPROVAL...</b>", parse_mode='HTML')
-        try:
-            tx = usdc_contract.functions.approve(CLOB_EXCHANGE, 2**256 - 1).build_transaction({
-                'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address),
-                'gas': 100000, 'gasPrice': w3.eth.gas_price
-            })
-            signed = vault.sign_transaction(tx)
-            hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            await context.bot.send_message(query.message.chat_id, f"✅ <b>NATIVE APPROVED:</b> <code>{hash.hex()[:10]}...</code>", parse_mode='HTML')
-        except Exception as e:
-            await context.bot.send_message(query.message.chat_id, f"☢️ <b>FAILED:</b> {str(e)[:50]}")
-
-    elif "INTEL_" in query.data:
+    if "INTEL_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
-        report = (f"📡 <b>TECHNICAL INTEL REPORT</b>\n━━━━━━━━━━━━━━\n"
+        report = (f"📡 <b>TECHNICAL INTEL</b>\n━━━━━━━━━━━━━━\n"
                   f"🔹 <b>MARKET:</b> {target['name']}\n"
                   f"📝 <b>INTEL:</b> <i>{target['q']}</i>\n"
                   f"🆔 <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
@@ -151,10 +138,9 @@ async def handle_callback(update, context):
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
         try:
-            # Atomic order using Native USDC signature context
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=target['token_id'], amount=stake, side=BUY))
             resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
-            msg = "✅ <b>NATIVE STRIKE SUCCESS</b>" if resp.get("success") else f"❌ <b>SIG ERROR:</b> {resp.get('errorMsg')}"
+            msg = "✅ <b>SUCCESS</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
         except Exception as e:
             await context.bot.send_message(query.message.chat_id, f"☢️ <b>ERROR:</b> {str(e)[:50]}")
