@@ -22,38 +22,34 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v135-HARDENED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v136-ID-LOCKED</code>
 """
 
-# --- 2. THE UNKILLABLE CONNECTION LAYER ---
+# --- 2. HARDENED NETWORK CONNECTION ---
 def get_hardened_w3():
-    # Rotates through providers to ensure no NoneType crash
     rpc_list = [
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
         "https://rpc.ankr.com/polygon",
         "https://1rpc.io/matic"
     ]
-    print("📡 Booting Network Handshake...")
     for url in rpc_list:
         if not url: continue
         try:
-            # Strip hidden whitespace characters that break containerized ENV variables
             _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                print(f"✅ Connection Established: {url[:25]}...")
                 return _w3
         except: continue
     return None
 
 w3 = get_hardened_w3()
-if w3 is None: exit("☢️ FATAL: All RPC Nodes Offline. Check Internet/ENV.")
+if w3 is None: exit("☢️ FATAL: RPC Connection Failed.")
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
-# --- 3. AUTH & VAULT PREFLIGHT ---
+# --- 3. AUTH & VAULT ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -64,22 +60,7 @@ def get_vault():
 
 vault = get_vault()
 
-def preflight_approval():
-    """Silent check: ensures exchange can spend USDC to prevent 'Auth Error' mid-trade"""
-    addr = Web3.to_checksum_address(vault.address)
-    try:
-        allow = usdc_contract.functions.allowance(addr, CTF_EXCHANGE).call()
-        if allow < 10**12: # Check if less than $1M USDC approved
-            print("🛠️  VAULT HANDSHAKE: Sending approval...")
-            tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
-                'from': addr, 'nonce': w3.eth.get_transaction_count(addr), 
-                'gasPrice': int(w3.eth.gas_price * 1.2)
-            })
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
-            print("✅ VAULT LOCKED & LOADED")
-    except Exception as e: print(f"⚠️  APPROVAL BYPASSED: {e}")
-
-# CLOB Setup (Signature Type 1 for Direct Wallet Interaction)
+# CLOB Setup (Signature Type 1 for EOA)
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
@@ -99,25 +80,32 @@ async def force_scour():
             markets = e.get('markets', [])
             if not markets: continue
             
+            # Step 1: Navigate past 'Event' and 'Market' level IDs
             m = markets[0]
-            outcomes = json.loads(m.get('outcomes', '[]'))
-            tids = m.get('clobTokenIds', [])
             
-            # THE FIX: Sync outcome labels ("Yes") to specific numeric Token IDs
-            final_tid = None
+            # Step 2: Extract labels and CLOB Token IDs
+            outcomes_raw = m.get('outcomes', '[]')
+            outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+            tids = m.get('clobTokenIds', []) 
+            
+            if not tids or len(tids) < 2: continue
+
+            # Step 3: THE FIX - Sync "Yes" label to correct numeric ID index
+            final_token_id = None
             for i, label in enumerate(outcomes):
-                if label.lower() in ['yes', 'over', 'up', 'more'] and i < len(tids):
-                    final_tid = str(tids[i])
+                if label.lower() in ['yes', 'over', 'up', 'more']:
+                    final_token_id = str(tids[i]) # Force 78-digit numeric string
                     break
             
-            if not final_tid and tids: final_tid = str(tids[0])
-            
-            if final_tid:
-                valid_pool.append({
-                    "name": m.get('group_item_title') or e.get('title')[:22],
-                    "token_id": final_tid,
-                    "vol": float(e.get('volumeNum', 0))
-                })
+            # Fallback to index 0 (standard for Yes)
+            if not final_token_id:
+                final_token_id = str(tids[0])
+
+            valid_pool.append({
+                "name": e.get('title')[:22],
+                "token_id": final_token_id,
+                "vol": float(e.get('volumeNum', 0))
+            })
 
         valid_pool.sort(key=lambda x: x['vol'], reverse=True)
         OMNI_STRIKE_CACHE = [{"name": x['name'], "token_id": x['token_id']} for x in valid_pool[:8]]
@@ -127,20 +115,20 @@ async def force_scour():
 # --- 5. INTERFACE & EXECUTION ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>APEX ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>APEX READY</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
         await force_scour()
         if not OMNI_STRIKE_CACHE:
-            await update.message.reply_text("☢️ NO SIGNAL")
+            await update.message.reply_text("☢️ NO SIGNAL: CHECK API")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("🌌 <b>TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif update.message.text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text("⚙️ <b>LOAD ATOMIC STRIKE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("⚙️ <b>LOAD:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif update.message.text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
@@ -156,7 +144,7 @@ async def handle_callback(update, context):
         stake = float(context.user_data.get('stake', 10))
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
         try:
-            # FIX: Ensure 78-digit Token ID is handled as string for CLOB
+            # Place Order with numeric ID and EOA Signature (Type 1)
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
                 token_id=target['token_id'], amount=stake, side=BUY
             ))
@@ -167,7 +155,6 @@ async def handle_callback(update, context):
             await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:100]}", parse_mode='HTML')
 
 if __name__ == "__main__":
-    preflight_approval() # Clear approvals before bot starts
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     loop = asyncio.get_event_loop(); loop.create_task(force_scour())
     app.add_handler(CommandHandler("start", start))
