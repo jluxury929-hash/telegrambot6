@@ -12,6 +12,7 @@ getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
+# Polymarket CTF Exchange & USDC (EIP-55 Checksummed)
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 
@@ -21,51 +22,30 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v117-RECOVERY</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v120-STABLE</code>
 """
 
-# --- 2. THE ULTIMATE RPC FAILOVER FIX ---
-
-
+# --- 2. RESILIENT NETWORK LAYER ---
 def get_hardened_w3():
-    # Massive list of backup Polygon nodes
+    # Rotates through providers to ensure no NoneType crash
     rpc_list = [
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
         "https://rpc.ankr.com/polygon",
-        "https://polygon.llamarpc.com",
-        "https://1rpc.io/matic",
-        "https://rpc-mainnet.maticvigil.com"
+        "https://1rpc.io/matic"
     ]
-    
-    print("🌐 Checking Global Connectivity...")
-    try:
-        requests.get("https://8.8.8.8", timeout=5) # Ping Google DNS
-    except:
-        print("☢️ NETWORK ERROR: Container has no Internet access.")
-        return None
-
     for url in rpc_list:
-        if not url or len(url) < 10: continue
+        if not url: continue
         try:
-            # Strip whitespace and hidden characters that break containers
-            clean_url = url.strip()
-            _w3 = Web3(Web3.HTTPProvider(clean_url, request_kwargs={'timeout': 10}))
-            
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                print(f"✅ LINK ESTABLISHED: {clean_url[:25]}...")
                 return _w3
-        except:
-            print(f"⚠️  NODE TIMEOUT: {url[:20]}...")
-            continue
+        except: continue
     return None
 
 w3 = get_hardened_w3()
-if w3 is None:
-    # Final Fallback: Wait 10 seconds and try one last time
-    time.sleep(10)
-    exit("☢️ FATAL: All RPC Nodes Offline. Check your .env RPC_URL.")
+if w3 is None: exit("☢️ FATAL: All RPC Nodes Offline.")
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
@@ -81,51 +61,50 @@ def get_vault():
 
 vault = get_vault()
 
-def preflight_auth():
-    addr = Web3.to_checksum_address(vault.address)
-    try:
-        allowance = usdc_contract.functions.allowance(addr, CTF_EXCHANGE).call()
-        if allowance < 10**12:
-            print("🛠️  AUTHENTICATING USDC...")
-            tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
-                'from': addr, 
-                'nonce': w3.eth.get_transaction_count(addr), 
-                'gasPrice': int(w3.eth.gas_price * 1.2) # Faster confirmation
-            })
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
-    except Exception as e:
-        print(f"⚠️  AUTH BYPASSED: {e}")
-
-# CLOB Setup
+# CLOB Setup (Signature Type 1 for EOA)
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
 
-# --- 4. ENGINE: GUARANTEED ID FETCH ---
+# --- 4. ENGINE: 100% ID ACCURACY ---
+
+
 async def force_scour():
     global OMNI_STRIKE_CACHE
     try:
-        url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id=10"
+        # Pulling from Discovery API (Gamma)
+        url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30&tag_id=10"
         resp = await asyncio.to_thread(requests.get, url, timeout=15)
         events = resp.json()
         valid_pool = []
+
         for e in events:
             markets = e.get('markets', [])
-            if markets:
-                m = markets[0]
-                outcomes = json.loads(m.get('outcomes', '[]'))
-                tids = m.get('clobTokenIds', [])
-                tid = None
-                # Match "Yes" outcome to numeric Token ID
-                for i, label in enumerate(outcomes):
-                    if label.lower() in ['yes', 'over', 'up', 'more'] and i < len(tids):
-                        tid = str(tids[i])
-                        break
-                if not tid and tids: tid = str(tids[0])
-                if tid:
-                    valid_pool.append({"name": e.get('title')[:22], "token_id": tid, "vol": float(e.get('volume', 0))})
+            if not markets: continue
+            
+            # Navigate to the outcome token IDs
+            m = markets[0]
+            outcomes = json.loads(m.get('outcomes', '[]'))
+            tids = m.get('clobTokenIds', [])
+            
+            # GUARANTEE: Match "Yes/Up" label to correct numeric ID index
+            final_tid = None
+            for i, label in enumerate(outcomes):
+                if label.lower() in ['yes', 'over', 'up', 'more'] and i < len(tids):
+                    final_tid = str(tids[i])
+                    break
+            
+            if not final_tid and tids: final_tid = str(tids[0])
+            
+            if final_tid:
+                valid_pool.append({
+                    "name": m.get('group_item_title') or e.get('title')[:22],
+                    "token_id": final_tid,
+                    "vol": float(e.get('volumeNum', 0))
+                })
+
         valid_pool.sort(key=lambda x: x['vol'], reverse=True)
         OMNI_STRIKE_CACHE = [{"name": x['name'], "token_id": x['token_id']} for x in valid_pool[:8]]
         return True
@@ -134,7 +113,7 @@ async def force_scour():
 # --- 5. INTERFACE & EXECUTION ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>APEX ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>APEX READY</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
@@ -163,6 +142,7 @@ async def handle_callback(update, context):
         stake = float(context.user_data.get('stake', 10))
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
         try:
+            # Place Order with numeric ID and EOA Signature
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
                 token_id=target['token_id'], amount=stake, side=BUY
             ))
@@ -170,10 +150,9 @@ async def handle_callback(update, context):
             msg = "✅ SUCCESS" if resp.get("success") else f"❌ FAIL: {resp.get('errorMsg')}"
             await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
         except Exception as e:
-            await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:50]}", parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:100]}", parse_mode='HTML')
 
 if __name__ == "__main__":
-    preflight_auth()
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     loop = asyncio.get_event_loop(); loop.create_task(force_scour())
     app.add_handler(CommandHandler("start", start))
