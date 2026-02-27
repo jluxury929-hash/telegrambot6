@@ -27,7 +27,7 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-INTEGRATED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-SIGNATURE-FIX</code>
 """
 
 # --- 2. HYDRA ENGINE ---
@@ -50,7 +50,7 @@ if not w3:
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
-# --- 3. VAULT & CLOB INIT ---
+# --- 3. VAULT & CLOB AUTH ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -59,8 +59,26 @@ def get_vault():
     except: return None
 
 vault = get_vault()
-clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
-clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
+
+def init_clob():
+    try:
+        # Default to Type 0 (Private Key). Set SIGNATURE_TYPE=1 in .env for Email/Proxy wallets.
+        sig_type = int(os.getenv("SIGNATURE_TYPE", 0))
+        client = ClobClient(
+            host="https://clob.polymarket.com", 
+            key=vault.key.hex(), 
+            chain_id=137, 
+            signature_type=sig_type, 
+            funder=vault.address
+        )
+        # Fresh derivation of API creds to prevent Invalid Signature errors
+        client.set_api_creds(client.create_or_derive_api_creds())
+        return client
+    except Exception as e:
+        print(f"Auth derivation failed: {e}")
+        return None
+
+clob_client = init_clob()
 
 # --- 4. DATA BRIDGE ---
 async def fetch_market_data(cond_id):
@@ -119,41 +137,18 @@ async def main_handler(update, context):
 
     elif 'VAULT' in cmd:
         bal = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
-        report = (f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n"
-                  f"USDC: <code>${bal/1e6:.2f}</code>\n"
-                  f"POL: <code>{w3.from_wei(pol, 'ether'):.4f}</code>\n"
-                  f"ADDR: <code>{vault.address[:15]}...</code>")
-        await update.message.reply_text(report, parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT</b>\nADDR: <code>{vault.address}</code>\nUSDC: ${bal/1e6:.2f}", parse_mode='HTML')
 
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text("📊 <b>SET STRIKE SIZE (USDC):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("📊 <b>SET STRIKE SIZE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif 'PORTFOLIO' in cmd:
         try:
             positions = await asyncio.to_thread(clob_client.get_positions)
-            if not positions:
-                await update.message.reply_text("<b>NO ACTIVE POSITIONS.</b>", parse_mode='HTML')
-                return
-            report = "<b>📦 ACTIVE POSITIONS</b>\n━━━━━━━━━━━━━━\n"
-            for p in positions:
-                if float(p.get('size', 0)) > 0:
-                    report += f"🔹 <code>{p.get('asset_id')[:8]}</code>: {p.get('size')} shares\n"
-            await update.message.reply_text(report, parse_mode='HTML')
+            report = "<b>📦 POSITIONS</b>\n" + "\n".join([f"🔹 {p.get('asset_id')[:8]}: {p.get('size')}" for p in positions if float(p.get('size', 0)) > 0])
+            await update.message.reply_text(report or "<b>NO POSITIONS</b>", parse_mode='HTML')
         except: await update.message.reply_text("⚠️ <b>FETCH ERROR.</b>")
-
-    elif 'TRADES' in cmd:
-        try:
-            trades = await asyncio.to_thread(clob_client.get_trades)
-            if not trades:
-                await update.message.reply_text("<b>NO RECENT TRADES.</b>", parse_mode='HTML')
-                return
-            report = "<b>📜 RECENT LOGS</b>\n━━━━━━━━━━━━━━\n"
-            for t in trades[:5]:
-                report += f"🔹 {t.get('side')} | ${t.get('price')} | {t.get('size')} shares\n"
-            await update.message.reply_text(report, parse_mode='HTML')
-        except: await update.message.reply_text("⚠️ <b>LOG ERROR.</b>")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -168,17 +163,21 @@ async def handle_query(update, context):
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         stake = float(context.user_data.get('stake', 10))
         try:
+            # 1. Prepare Order
             order_args = MarketOrderArgs(token_id=str(target['token_id']), amount=stake, side=BUY, price=0.999)
+            
+            # 2. Patch SDK missing attributes
             setattr(order_args, 'size', stake)
-            setattr(order_args, 'expiration', 0) 
+            setattr(order_args, 'expiration', 0) # Fixed for FOK orders
 
+            # 3. Create, Sign (Local), and Post (API)
             signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
             resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
             
-            status = "✅ <b>SUCCESS</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
+            status = "✅ <b>STRIKE SUCCESS</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
         except Exception as e:
-            await context.bot.send_message(q.message.chat_id, f"⚠️ <b>SDK ERROR:</b> {str(e)}", parse_mode='HTML')
+            await context.bot.send_message(q.message.chat_id, f"⚠️ <b>SIGNATURE ERROR:</b> {str(e)}", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
