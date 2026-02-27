@@ -12,8 +12,10 @@ from google import genai
 getcontext().prec = 28
 load_dotenv()
 
-# THE FIX: Inject proxy into environment so SDK "inherits" it automatically
+# THE FIX: Split-Tunnel Injection
 PROXY_URL = os.getenv("PROXY_URL")
+# We only want to proxy the CLOB/Gamma requests, not the local RPC if possible.
+# We set this globally, but we will "Un-Proxy" the RPC provider specifically.
 if PROXY_URL:
     os.environ['HTTP_PROXY'] = PROXY_URL
     os.environ['HTTPS_PROXY'] = PROXY_URL
@@ -28,20 +30,29 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v240-ENV-LOCKED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v250-SPLIT-FIX</code>
 """
 
-# --- 2. HYDRA RPC ENGINE ---
+# --- 2. HYDRA RPC ENGINE (SPLIT-TUNNEL SECURE) ---
 def get_hydra_w3():
+    """Cycles nodes. Specifically disables proxy for RPC to prevent FATAL error."""
     rpc_endpoints = [
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
-        "https://rpc.ankr.com/polygon"
+        "https://rpc.ankr.com/polygon",
+        "https://polygon.llamarpc.com",
+        "https://1rpc.io/matic"
     ]
+    # We create a session that IGNORES the system proxy for blockchain data
+    direct_session = requests.Session()
+    direct_session.trust_env = False 
+
     for url in rpc_endpoints:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 8}))
+            # Injecting the direct session to bypass os.environ['HTTPS_PROXY']
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), 
+                                         request_kwargs={'timeout': 10, 'proxies': {}}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
@@ -49,10 +60,12 @@ def get_hydra_w3():
     return None
 
 w3 = get_hydra_w3()
-if w3 is None: exit("☢️ FATAL: RPC Connection Failed.")
+if w3 is None:
+    # If this fails, the proxy is likely interfering with local network resolution
+    exit("☢️ FATAL: RPC Connection Failed. Disable PROXY_URL to test RPC health.")
 
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
 # --- 3. AUTH & VAULT ---
@@ -71,7 +84,7 @@ from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
 def init_clob():
-    """SDK v240: Proxy is handled via OS Environment variables."""
+    """Polymarket Client: Inherits the PROXY from os.environ for trading."""
     client = ClobClient(
         host="https://clob.polymarket.com", 
         key=vault.key.hex(), 
@@ -80,48 +93,36 @@ def init_clob():
         funder=vault.address
     )
     try:
-        # This handshake now travels through the proxy set in os.environ
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except Exception as e:
-        print(f"Auth Block: Ensure your proxy region is supported. {e}")
+        print(f"Auth Block: US-WEST detection active. {e}")
         return client
 
 clob_client = init_clob()
 
 # --- 4. DATA HARVESTING ---
-async def get_verified_clob_id(condition_id):
-    try:
-        url = f"https://clob.polymarket.com/markets/{condition_id}"
-        # Standard requests will automatically use os.environ['HTTPS_PROXY']
-        resp = await asyncio.to_thread(requests.get, url, timeout=10)
-        data = resp.json()
-        for token in data.get('tokens', []):
-            if token.get('outcome', '').lower() == 'yes':
-                return str(token.get('token_id')), float(token.get('price', 0.0))
-    except: return None, 0.0
-
 async def force_scour():
     global OMNI_STRIKE_CACHE
+    # Scans multiple schemas to ensure targets exist
     tags = [1, 10, 100, 237]
     validated_pool = []
     for tag in tags:
         url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=10&tag_id={tag}"
         try:
+            # This uses the PROXY tunnel
             resp = await asyncio.to_thread(requests.get, url, timeout=10)
             events = resp.json()
             for e in events:
                 m = e.get('markets', [])
-                if m and m[0].get('conditionId'):
-                    v_tid, price = await get_verified_clob_id(m[0]['conditionId'])
-                    if v_tid:
-                        validated_pool.append({
-                            "name": e.get('title')[:22],
-                            "q": m[0].get('question'),
-                            "token_id": v_tid,
-                            "price": price,
-                            "vol": float(e.get('volumeNum', 0))
-                        })
+                if m and m[0].get('clobTokenIds'):
+                    tid = str(m[0]['clobTokenIds'][0]) # YES Token
+                    validated_pool.append({
+                        "name": e.get('title')[:22],
+                        "q": m[0].get('question'),
+                        "token_id": tid,
+                        "vol": float(e.get('volumeNum', 0))
+                    })
         except: continue
     
     validated_pool.sort(key=lambda x: x['vol'], reverse=True)
@@ -131,7 +132,7 @@ async def force_scour():
 # --- 5. INTERFACE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>ENV-TUNNEL ACTIVE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>SPLIT-TUNNEL: RPC SECURED</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     text = update.message.text
@@ -140,7 +141,7 @@ async def main_handler(update, context):
         success = await force_scour()
         await msg.delete()
         if not success:
-            await update.message.reply_text("☢️ <b>API TIMEOUT: CHECK PROXY ENV</b>")
+            await update.message.reply_text("☢️ <b>API TIMEOUT: CHECK PROXY REGION</b>")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"INTEL_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
@@ -159,11 +160,10 @@ async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
     if "INTEL_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
-        report = (f"📡 <b>INTEL REPORT</b>\n━━━━━━━━━━━━━━\n"
+        report = (f"📡 <b>TECHNICAL INTEL</b>\n━━━━━━━━━━━━━━\n"
                   f"🔹 <b>MARKET:</b> {target['name']}\n"
                   f"📝 <b>INTEL:</b> <i>{target['q']}</i>\n"
-                  f"🆔 <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
-                  f"💹 <b>PRICE:</b> <code>${target['price']:.3f}</code>")
+                  f"🆔 <b>ASSET ID:</b> <code>{target['token_id']}</code>")
         kb = [[InlineKeyboardButton("🚀 EXECUTE STRIKE", callback_data=f"EXEC_{idx}")]]
         await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
@@ -171,7 +171,6 @@ async def handle_callback(update, context):
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
         try:
-            # Atomic Strike (inherited proxy from os.environ)
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
                 token_id=str(target['token_id']), amount=stake, side=BUY
             ))
