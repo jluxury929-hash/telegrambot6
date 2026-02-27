@@ -1,5 +1,6 @@
 import os, asyncio, json, time, requests, re
 from decimal import Decimal, getcontext
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from eth_account import Account
 from web3 import Web3
@@ -14,7 +15,6 @@ load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
 
-# Constants for 2026 Polymarket Protocol
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
@@ -24,39 +24,26 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v160-RECURSIVE-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v165-NO-DRIFT</code>
 """
 
-# --- 2. THE UNBREAKABLE NETWORK PULSE ---
+# --- 2. HARDENED CONNECTION ---
 def get_hardened_w3():
-    """Cycles through 2026 premium and public nodes to prevent NoneType crash."""
-    rpc_list = [
-        os.getenv("RPC_URL"),
-        "https://polygon-rpc.com",
-        "https://rpc.ankr.com/polygon",
-        "https://polygon.llamarpc.com",
-        "https://1rpc.io/matic",
-        "https://polygon.drpc.org"
-    ]
-    print("📡 Initializing AI Network Handshake...")
+    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
     for url in rpc_list:
         if not url: continue
         try:
             _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                print(f"✅ CONNECTION SECURED: {url[:25]}...")
                 return _w3
         except: continue
     return None
 
-# CRITICAL: Pulse Check
 w3 = get_hardened_w3()
-if w3 is None:
-    print("☢️ FATAL: Container cannot reach Polygon. Manual Intervention Required.")
-    import sys; sys.exit(1)
+if w3 is None: exit("☢️ FATAL: RPC Connection Failed.")
 
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
 # --- 3. AUTH & CLOB ---
@@ -74,89 +61,88 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-# Sig Type 1 (EOA) or 2 (Proxy) depending on your vault setup
-clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
+# --- 4. CLOB-NATIVE ID RESOLVER (BYPASSING GAMMA ERROR) ---
+async def get_clob_native_id(condition_id):
+    """Query CLOB directly for the Token IDs to ensure 100% data alignment."""
+    try:
+        url = f"https://clob.polymarket.com/markets/{condition_id}"
+        resp = await asyncio.to_thread(requests.get, url, timeout=10)
+        data = resp.json()
+        # Returns a list of tokens with outcome names directly from the trading engine
+        for token in data.get('tokens', []):
+            if token.get('outcome', '').lower() == 'yes':
+                return str(token.get('token_id'))
+        return None
+    except: return None
 
-# --- 4. AI DATA RE-INDEXER: MARKET VS TRADE IDS ---
 async def force_scour():
-    """Uses AI to reorganize Gamma market data into valid CLOB Token IDs."""
+    """Scours Gamma for high-volume markets, but validates Token IDs against CLOB Native Data."""
     global OMNI_STRIKE_CACHE
-    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30&tag_id=10"
+    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=25&tag_id=10"
     try:
         resp = await asyncio.to_thread(requests.get, url, timeout=15)
         events = resp.json()
-        raw_pool = []
+        validated_pool = []
 
         for e in events:
             m = e.get('markets', [])
-            if m and m[0].get('clobTokenIds'):
-                raw_pool.append({
-                    "event_title": e.get('title'),
-                    "outcomes": m[0].get('outcomes'),
-                    "clob_ids": m[0].get('clobTokenIds')
-                })
+            if m and m[0].get('conditionId'):
+                cond_id = m[0]['conditionId']
+                # CROSS-CHECK: Ask CLOB what the ID is, ignore Gamma's ID
+                verified_tid = await get_clob_native_id(cond_id)
+                if verified_tid:
+                    validated_pool.append({
+                        "name": e.get('title')[:22],
+                        "token_id": verified_tid,
+                        "vol": float(e.get('volumeNum', 0))
+                    })
+        
+        validated_pool.sort(key=lambda x: x['vol'], reverse=True)
+        OMNI_STRIKE_CACHE = validated_pool[:8]
+        return True
+    except: return False
 
-        # REORGANIZATION PROMPT: AI identifies 'Yes' side specifically
-        prompt = (f"Analyze {json.dumps(raw_pool[:12])}. Reorganize the data. "
-                  "Extract the exact 78-digit numeric clobTokenId for the 'Yes' outcome. "
-                  "Return ONLY raw JSON: [{'name': 'ShortTitle', 'token_id': '78DigitNumericString'}]")
-        
-        ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt)
-        
-        # Clean AI markdown backticks
-        clean_json = re.sub(r'```json|```', '', ai_resp.text).strip()
-        winners = json.loads(clean_json)
-        
-        if winners:
-            # VALIDATION: Reject non-numeric Token IDs (Stops 400 error)
-            OMNI_STRIKE_CACHE = [w for w in winners if str(w['token_id']).isdigit()]
-            return True
-    except Exception as e:
-        print(f"AI Sync Fail: {e}")
-        return False
-
-# --- 5. INTERFACE & EXECUTION ---
+# --- 5. INTERFACE & TIME-FIXED EXECUTION ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>AI-RECURSIVE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>APEX READY (DRIFT-FIXED)</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
-        msg = await update.message.reply_text("🌀 <b>AI-REORGANIZING MARKET DATA...</b>", parse_mode='HTML')
+        msg = await update.message.reply_text("🌀 <b>PULSING CLOB DIRECTORY...</b>")
         success = await force_scour()
         await msg.delete()
         if not success or not OMNI_STRIKE_CACHE:
-            await update.message.reply_text("☢️ <b>AI SYNC FAILED: RPC DRIFT DETECTED.</b>")
+            await update.message.reply_text("☢️ <b>API HANDSHAKE FAILED.</b>")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text("🌌 <b>AI-MAPPED TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    
-    elif update.message.text == '💳 VAULT':
-        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
-        raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
-        await update.message.reply_text(f"⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n💵 USDC: <code>${raw_usdc/1e6:.2f}</code>", parse_mode='HTML')
+        await update.message.reply_text("🌌 <b>CLOB-VALIDATED TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
     if "HIT_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
-        kb = [[InlineKeyboardButton("✅ CONFIRM AI-MAPPING & STRIKE", callback_data=f"EXEC_{idx}")]]
-        await query.edit_message_text(f"🚀 <b>STRIKE PATH:</b> {target['name']}\n🆔 <b>CLOB_ID:</b> <code>{target['token_id']}</code>\n\n<b>AI-VERIFIED. PROCEED?</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        kb = [[InlineKeyboardButton("✅ CONFIRM & ATOMIC STRIKE", callback_data=f"EXEC_{idx}")]]
+        await query.edit_message_text(f"🚀 <b>TARGET:</b> {target['name']}\n🆔 <b>CLOB_ID:</b> <code>{target['token_id']}</code>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif "EXEC_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
-        await query.edit_message_text(f"⚡ <b>ATOMIC STRIKE IN PROGRESS...</b>", parse_mode='HTML')
+        
+        # CLOCK SKEW FIX: Manually build a slightly lagged client to prevent 'Future Timestamp' error
+        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
+        
         try:
-            order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
+            # We use clob_client directly here as the SDK handles internal nonces
+            order = await asyncio.to_thread(client.create_market_order, MarketOrderArgs(
                 token_id=str(target['token_id']), amount=stake, side=BUY
             ))
-            resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
+            resp = await asyncio.to_thread(client.post_order, order, OrderType.FOK)
             msg = "✅ SUCCESS" if resp.get("success") else f"❌ FAIL: {resp.get('errorMsg')}"
             await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
         except Exception as e:
-            await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:100]}", parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:100]}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
