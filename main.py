@@ -8,35 +8,23 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from google import genai
 
-# Polymarket Specifics
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
-from py_clob_client.constants import POLYGON
-
-# Universal fix for the BUY/SELL import error
-try:
-    from py_clob_client.clob_types import BUY
-except ImportError:
-    try:
-        from py_clob_client.order_builder.constants import BUY
-    except ImportError:
-        BUY = "BUY"
-
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
 
+# Constants
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
-███████║██████╔╝█████╗     ╚███╔╝
-██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
+███████║██████╔╝█████╗    ╚███╔╝
+██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v211-SIG-FIXED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v210-SCHEMA-FIX</code>
 """
 
 # --- 2. HYDRA RPC ENGINE ---
@@ -45,7 +33,7 @@ def get_hydra_w3():
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
         "https://rpc.ankr.com/polygon",
-        "https://1rpc.io/matic"
+        "https://polygon.llamarpc.com"
     ]
     for url in rpc_endpoints:
         if not url: continue
@@ -62,7 +50,7 @@ if w3 is None:
     print(" FATAL: Hydra Engine Failed.")
     import sys; sys.exit(1)
 
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
 # --- 3. AUTH & VAULT ---
@@ -76,22 +64,19 @@ def get_vault():
 
 vault = get_vault()
 
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import MarketOrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY
+
 def init_clob():
-    # FIXED: signature_type must be 2 for EIP-712 (The 'Invalid Signature' fix)
-    client = ClobClient(
-        host="https://clob.polymarket.com", 
-        key=vault.key.hex(), 
-        chain_id=137, 
-        signature_type=2, 
-        funder=vault.address
-    )
-    # This derives the necessary API keys from your wallet signature
+    # Signature Type 1 for Polymarket Proxy
+    client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
     client.set_api_creds(client.create_or_derive_api_creds())
     return client
 
 clob_client = init_clob()
 
-# --- 4. DATA BRIDGE ---
+# --- 4. DATA BRIDGE (MULTI-TAG DISCOVERY) ---
 async def get_verified_clob_id(condition_id):
     try:
         url = f"https://clob.polymarket.com/markets/{condition_id}"
@@ -99,14 +84,14 @@ async def get_verified_clob_id(condition_id):
         data = resp.json()
         for token in data.get('tokens', []):
             if token.get('outcome', '').lower() == 'yes':
-                return str(token.get('token_id')), token.get('price', 0.0)
+                return str(token.get('token_id')), float(token.get('price', 0.0))
     except: return None, 0.0
-    return None, 0.0
 
 async def force_scour():
     global OMNI_STRIKE_CACHE
     tags = [1, 10, 100, 237]
     validated_pool = []
+    
     for tag in tags:
         url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=15&tag_id={tag}"
         try:
@@ -126,6 +111,7 @@ async def force_scour():
                             "vol": float(e.get('volumeNum', 0))
                         })
         except: continue
+    
     validated_pool.sort(key=lambda x: x['vol'], reverse=True)
     OMNI_STRIKE_CACHE = validated_pool[:8]
     return True if validated_pool else False
@@ -138,36 +124,41 @@ async def start(update, context):
 async def main_handler(update, context):
     text = update.message.text
     if text in [' START SNIPER', ' REFRESH']:
-        msg = await update.message.reply_text(" SCANNING MULTI-TAG SCHEMAS...")
+        msg = await update.message.reply_text(" <b>SCANNING MULTI-TAG SCHEMAS...</b>")
         success = await force_scour()
         await msg.delete()
         if not success:
-            await update.message.reply_text(" GLOBAL API TIMEOUT: RE-TRYING...")
+            await update.message.reply_text(" <b>GLOBAL API TIMEOUT: RE-TRYING...</b>")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"INTEL_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text(" TARGETS IDENTIFIED:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-   
+        await update.message.reply_text(" <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    
     elif text == ' CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text(" LOAD ATOMIC STRIKE (USDC):", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text(" <b>LOAD ATOMIC STRIKE (USDC):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif text == ' VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
+        raw_allowance = await asyncio.to_thread(usdc_contract.functions.allowance(vault.address, CTF_EXCHANGE).call)
+        
+        status = "✅ READY" if raw_allowance > 1e12 else "⚠️ NO ALLOWANCE"
         report = (f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n"
                   f" POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n"
                   f" USDC: <code>${raw_usdc/1e6:.2f}</code>\n"
+                  f" EXCH ALLOWANCE: <b>{status}</b>\n"
                   f" ADDR: <code>{vault.address[:10]}...</code>")
         await update.message.reply_text(report, parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
-   
+    
     if "INTEL_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         report = (
-            f" <b>TECHNICAL INTEL REPORT</b>\n━━━━━━━━━━━━━━\n"
+            f" <b>TECHNICAL INTEL REPORT</b>\n"
+            f"━━━━━━━━━━━━━━\n"
             f" <b>MARKET:</b> {target['name']}\n"
             f" <b>QUESTION:</b> <i>{target['q']}</i>\n\n"
             f" <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
@@ -186,27 +177,29 @@ async def handle_callback(update, context):
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
         
-        status_msg = await context.bot.send_message(query.message.chat_id, " <b>TRANSMITTING SIGNED ORDER...</b>", parse_mode='HTML')
-        
         try:
-            # Step 1: Create the signed order
-            order = await asyncio.to_thread(clob_client.create_order, MarketOrderArgs(
+            # FIX: Create arguments and then use the SDK to sign the order internally
+            order_args = MarketOrderArgs(
                 token_id=str(target['token_id']), 
                 amount=stake, 
                 side=BUY
-            ))
-            # Step 2: Post the signed order
-            resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
+            )
+            
+            # This signs the order with your EIP-712 signature locally
+            signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
+            
+            # Post the signed order to the book
+            resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
             
             if resp.get("success"):
-                msg = f"✅ <b>SUCCESS</b>\nOrder ID: <code>{resp.get('orderID')}</code>"
+                msg = f"✅ <b>STRIKE SUCCESSFUL</b>\nORDER ID: <code>{resp.get('orderID')}</code>"
             else:
                 msg = f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             
-            await status_msg.edit_text(msg, parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
             
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ <b>SIGNATURE ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, f"⚠️ <b>SIGNATURE/EXEC ERROR:</b> {str(e)[:100]}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
