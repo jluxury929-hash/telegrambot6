@@ -18,7 +18,7 @@ load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
 
-# POLYMARKET USES USDC.e (BRIDGED)
+# POLYMARKET USES USDC.e (Bridged) - 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
@@ -28,7 +28,7 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-ALLOWANCE-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-PRO-GUARD</code>
 """
 
 # --- 2. HYDRA ENGINE ---
@@ -51,7 +51,7 @@ if not w3:
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
-# --- 3. VAULT & AUTH ---
+# --- 3. VAULT & CLOB AUTH ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -67,26 +67,13 @@ def init_clob():
         client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=vault.address)
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
-    except: return None
+    except Exception as e:
+        print(f"Auth derivation failed: {e}")
+        return None
 
 clob_client = init_clob()
 
-# --- 4. ALLOWANCE LOGIC ---
-async def check_and_approve_allowance(amount_usdc):
-    allowance = usdc_contract.functions.allowance(vault.address, CTF_EXCHANGE).call()
-    if allowance < (amount_usdc * 1e6):
-        print(f"🔄 Low Allowance: Approving Exchange...")
-        tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
-            'from': vault.address,
-            'nonce': w3.eth.get_transaction_count(vault.address),
-            'gasPrice': w3.eth.gas_price
-        })
-        signed_tx = w3.eth.account.sign_transaction(tx, vault.key)
-        w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        return False # Needs a moment to process
-    return True
-
-# --- 5. DATA & UI (REMAINING CODE) ---
+# --- 4. DATA BRIDGE ---
 async def fetch_market_data(cond_id):
     try:
         url = f"https://clob.polymarket.com/markets/{cond_id}"
@@ -123,42 +110,48 @@ async def force_scour():
         return True
     return False
 
+# --- 5. UI HANDLERS ---
 async def start(update, context):
     btns = [['🚀 START SNIPER', '⚙️ CALIBRATE'], ['🔒 VAULT', '🔄 REFRESH'], ['📦 PORTFOLIO', '📜 TRADES']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA-AI ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA-AI SYSTEM ONLINE</b>", 
+                                   reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START SNIPER' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING...</b>")
+        m = await update.message.reply_text("📡 <b>SCANNING...</b>", parse_mode='HTML')
         if await force_scour():
             kb = [[InlineKeyboardButton(f"🎯 {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
             await m.edit_text("<b>ACTIVE TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("❌ <b>SCAN FAILED.</b>")
+
     elif 'VAULT' in cmd:
-        bal = await asyncio.to_thread(usdc_contract.functions.balanceOf, vault.address)
-        await update.message.reply_text(f"<b>VAULT</b>\nUSDC.e: ${bal/1e6:.2f}\nADDR: <code>{vault.address}</code>", parse_mode='HTML')
-    elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text("📊 <b>SET STRIKE SIZE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        bal = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
+        await update.message.reply_text(f"<b>VAULT</b>\nADDR: <code>{vault.address}</code>\nUSDC.e: ${bal/1e6:.2f}", parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
+    
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['stake'] = val
-        await q.edit_message_text(f"✅ <b>STRIKE LOADED: ${val} USDC.e</b>")
+        await q.edit_message_text(f"✅ <b>STRIKE LOADED: ${val} USDC</b>")
+
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         kb = [[InlineKeyboardButton("⚡ EXECUTE ATOMIC STRIKE", callback_data=f"EXE_{idx}")]]
         await q.edit_message_text(f"<b>TARGET:</b> {target['q']}\n<b>PRICE:</b> ${target['price']}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         stake = float(context.user_data.get('stake', 10))
         
-        # --- PRE-FLIGHT CHECK ---
-        ready = await check_and_approve_allowance(stake)
-        if not ready:
-            await context.bot.send_message(q.message.chat_id, "⏳ <b>APPROVING USDC.e...</b> Wait 10 seconds then try again.", parse_mode='HTML')
+        # --- SMART CONTRACT ALLOWANCE GUARD ---
+        allowance = await asyncio.to_thread(usdc_contract.functions.allowance(vault.address, CTF_EXCHANGE).call)
+        if allowance < (stake * 1e6):
+            kb = [[InlineKeyboardButton("📝 APPROVE SMART CONTRACT", callback_data="APPROVE_CONTRACT")]]
+            await context.bot.send_message(q.message.chat_id, 
+                "⚠️ <b>PERMISSION REQUIRED</b>\nThe Polymarket Smart Contract is not authorized to spend your USDC yet. Do you want to grant permission?", 
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             return
 
         try:
@@ -167,10 +160,25 @@ async def handle_query(update, context):
             signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
             resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
             
-            status = "✅ <b>SUCCESS</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
+            status = "✅ <b>STRIKE SUCCESS</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
         except Exception as e:
             await context.bot.send_message(q.message.chat_id, f"⚠️ <b>SDK ERROR:</b> {str(e)}", parse_mode='HTML')
+
+    elif q.data == "APPROVE_CONTRACT":
+        m = await q.edit_message_text("🔄 <b>INITIATING APPROVAL...</b>", parse_mode='HTML')
+        try:
+            # Build and sign the approval transaction
+            tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
+                'from': vault.address,
+                'nonce': w3.eth.get_transaction_count(vault.address),
+                'gasPrice': w3.eth.gas_price
+            })
+            signed_tx = w3.eth.account.sign_transaction(tx, vault.key)
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            await m.edit_text(f"✅ <b>APPROVAL BROADCASTED</b>\nTransaction Hash: <code>{tx_hash.hex()[:25]}...</code>\n\n<i>Wait 15 seconds for Polygon to confirm, then strike again!</i>", parse_mode='HTML')
+        except Exception as e:
+            await m.edit_text(f"❌ <b>APPROVAL FAILED:</b> {str(e)[:50]}", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
