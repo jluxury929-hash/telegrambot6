@@ -8,16 +8,18 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from google import genai
 
-# --- 1. CORE CONFIG & PROXY HYDRA ---
+# --- 1. CORE CONFIG & PROXY OVERRIDE ---
 getcontext().prec = 28
 load_dotenv()
-ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# PROXY CONFIG: Essential for bypassing SE Asia / US-East blocks
-# Format in .env: PROXY_URL=http://username:password@ip:port
+# THE FIX: Inject proxy into environment so SDK "inherits" it automatically
 PROXY_URL = os.getenv("PROXY_URL")
-proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+if PROXY_URL:
+    os.environ['HTTP_PROXY'] = PROXY_URL
+    os.environ['HTTPS_PROXY'] = PROXY_URL
+    print(f"🌐 PROXY TUNNEL INJECTED: {PROXY_URL[:25]}...")
 
+ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
 
 LOGO = """
@@ -26,7 +28,7 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v230-GEO-LOCKED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v240-ENV-LOCKED</code>
 """
 
 # --- 2. HYDRA RPC ENGINE ---
@@ -34,9 +36,7 @@ def get_hydra_w3():
     rpc_endpoints = [
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
-        "https://rpc.ankr.com/polygon",
-        "https://polygon.llamarpc.com",
-        "https://1rpc.io/matic"
+        "https://rpc.ankr.com/polygon"
     ]
     for url in rpc_endpoints:
         if not url: continue
@@ -49,15 +49,13 @@ def get_hydra_w3():
     return None
 
 w3 = get_hydra_w3()
-if w3 is None:
-    print("☢️ FATAL: Hydra Engine Failed. RPC Pulse Flatline.")
-    import sys; sys.exit(1)
+if w3 is None: exit("☢️ FATAL: RPC Connection Failed.")
 
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
-# --- 3. AUTH & VAULT (PROXIED HANDSHAKE) ---
+# --- 3. AUTH & VAULT ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -73,31 +71,30 @@ from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
 def init_clob():
-    # Tunnel the CLOB handshake through the proxy to bypass 403 Forbidden
+    """SDK v240: Proxy is handled via OS Environment variables."""
     client = ClobClient(
         host="https://clob.polymarket.com", 
         key=vault.key.hex(), 
         chain_id=137, 
         signature_type=1, 
-        funder=vault.address,
-        request_kwargs={"proxies": proxies, "timeout": 15} if proxies else {"timeout": 15}
+        funder=vault.address
     )
     try:
+        # This handshake now travels through the proxy set in os.environ
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except Exception as e:
-        print(f"Auth Block: Ensure Proxy is set for restricted regions. {e}")
+        print(f"Auth Block: Ensure your proxy region is supported. {e}")
         return client
 
 clob_client = init_clob()
 
-# --- 4. DATA BRIDGE (MULTI-TAG DISCOVERY) ---
+# --- 4. DATA HARVESTING ---
 async def get_verified_clob_id(condition_id):
-    """Fetches real-time price through proxy to fix $0.00 error."""
     try:
         url = f"https://clob.polymarket.com/markets/{condition_id}"
-        # Direct CLOB query via proxy ensures data alignment
-        resp = await asyncio.to_thread(requests.get, url, proxies=proxies, timeout=10)
+        # Standard requests will automatically use os.environ['HTTPS_PROXY']
+        resp = await asyncio.to_thread(requests.get, url, timeout=10)
         data = resp.json()
         for token in data.get('tokens', []):
             if token.get('outcome', '').lower() == 'yes':
@@ -106,11 +103,10 @@ async def get_verified_clob_id(condition_id):
 
 async def force_scour():
     global OMNI_STRIKE_CACHE
-    tags = [1, 10, 100, 237] # Politics, Crypto, Sports, Global
+    tags = [1, 10, 100, 237]
     validated_pool = []
-    
     for tag in tags:
-        url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=15&tag_id={tag}"
+        url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=10&tag_id={tag}"
         try:
             resp = await asyncio.to_thread(requests.get, url, timeout=10)
             events = resp.json()
@@ -132,10 +128,10 @@ async def force_scour():
     OMNI_STRIKE_CACHE = validated_pool[:8]
     return True if validated_pool else False
 
-# --- 5. UI & INTEL EXECUTION ---
+# --- 5. INTERFACE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA PROXY: TUNNEL ESTABLISHED</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>ENV-TUNNEL ACTIVE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     text = update.message.text
@@ -144,16 +140,12 @@ async def main_handler(update, context):
         success = await force_scour()
         await msg.delete()
         if not success:
-            await update.message.reply_text("☢️ <b>API TIMEOUT: CHECK PROXY CONNECTION</b>")
+            await update.message.reply_text("☢️ <b>API TIMEOUT: CHECK PROXY ENV</b>")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"INTEL_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
         await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     
-    elif text == '⚙️ CALIBRATE':
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text("⚙️ <b>LOAD ATOMIC STRIKE (CAD):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
     elif text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
@@ -165,30 +157,21 @@ async def main_handler(update, context):
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
-    
     if "INTEL_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
-        report = (
-            f"📡 <b>TECHNICAL INTEL REPORT</b>\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"🔹 <b>MARKET:</b> {target['name']}\n"
-            f"📝 <b>QUESTION:</b> <i>{target['q']}</i>\n\n"
-            f"🆔 <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
-            f"💹 <b>EST. PRICE:</b> <code>${target['price']:.3f}</code>\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚡ <i>Proxy Tunneling active for atomic strike.</i>"
-        )
-        kb = [[InlineKeyboardButton("🚀 EXECUTE ATOMIC STRIKE", callback_data=f"EXEC_{idx}")]]
+        report = (f"📡 <b>INTEL REPORT</b>\n━━━━━━━━━━━━━━\n"
+                  f"🔹 <b>MARKET:</b> {target['name']}\n"
+                  f"📝 <b>INTEL:</b> <i>{target['q']}</i>\n"
+                  f"🆔 <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
+                  f"💹 <b>PRICE:</b> <code>${target['price']:.3f}</code>")
+        kb = [[InlineKeyboardButton("🚀 EXECUTE STRIKE", callback_data=f"EXEC_{idx}")]]
         await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
-    elif "SET_" in query.data:
-        val = int(query.data.split("_")[1]); context.user_data['stake'] = val
-        await query.edit_message_text(f"✅ <b>STRIKE LOAD: ${val} CAD</b>")
 
     elif "EXEC_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
         try:
+            # Atomic Strike (inherited proxy from os.environ)
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
                 token_id=str(target['token_id']), amount=stake, side=BUY
             ))
