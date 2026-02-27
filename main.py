@@ -8,10 +8,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from google import genai
 
-# Polymarket Specifics
+# Polymarket Specifics - FIXED IMPORTS HERE
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
-from py_clob_client.constants import POLYGON, BUY
+from py_clob_client.clob_types import MarketOrderArgs, OrderType, BUY, SELL
+from py_clob_client.constants import POLYGON
 
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
@@ -20,7 +20,6 @@ ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
 
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
@@ -28,7 +27,7 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v2.1.0-SIG-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v2.1.1-IMPORT-FIX</code>
 """
 
 # --- 2. HYDRA RPC ENGINE ---
@@ -74,7 +73,6 @@ vault = get_vault()
 
 def init_clob():
     """Initializes the Polymarket CLOB client with EIP-712 signing."""
-    # Signature Type 2 is standard for EIP-712 (required by Polymarket)
     client = ClobClient(
         host="https://clob.polymarket.com", 
         key=vault.key.hex(), 
@@ -82,7 +80,6 @@ def init_clob():
         signature_type=2, 
         funder=vault.address
     )
-    # Derive and set API credentials for authenticated requests
     client.set_api_creds(client.create_or_derive_api_creds())
     return client
 
@@ -195,17 +192,13 @@ async def handle_callback(update, context):
         status_msg = await context.bot.send_message(query.message.chat_id, " <b>INITIATING ATOMIC STRIKE...</b>", parse_mode='HTML')
         
         try:
-            # Step 1: Build the order arguments
             order_args = MarketOrderArgs(
                 token_id=str(target['token_id']),
                 amount=stake,
                 side=BUY
             )
             
-            # Step 2: Create and Sign the order (Handles EIP-712 signing internally)
             signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
-            
-            # Step 3: Post to the order book as Fill-Or-Kill (FOK)
             resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
             
             if resp.get("success"):
@@ -216,7 +209,7 @@ async def handle_callback(update, context):
             await status_msg.edit_text(msg, parse_mode='HTML')
             
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ <b>SIGNATURE ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
+            await status_msg.edit_text(f"⚠️ <b>EXECUTION ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
