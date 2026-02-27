@@ -7,14 +7,14 @@ from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
-# --- 1. CORE CONFIG ---
+# --- 1. CORE CONFIG & CONSTANTS ---
 getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
-# Polymarket CTF Exchange & USDC (EIP-55 Checksummed)
-CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+# Polymarket Protocols (Polygon Mainnet)
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
@@ -22,11 +22,12 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v136-ID-LOCKED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v138-ID-LOCKED</code>
 """
 
-# --- 2. HARDENED NETWORK CONNECTION ---
+# --- 2. THE UNKILLABLE CONNECTION LAYER ---
 def get_hardened_w3():
+    """Rotates through providers to ensure no NoneType crash."""
     rpc_list = [
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
@@ -44,8 +45,9 @@ def get_hardened_w3():
     return None
 
 w3 = get_hardened_w3()
-if w3 is None: exit("☢️ FATAL: RPC Connection Failed.")
+if w3 is None: exit("☢️ FATAL: RPC Connection Failed. Check your network.")
 
+# Hardened ABI for ERC20 functions
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
@@ -60,19 +62,27 @@ def get_vault():
 
 vault = get_vault()
 
-# CLOB Setup (Signature Type 1 for EOA)
+# Initialize CLOB Client
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
+clob_client = ClobClient(
+    host="https://clob.polymarket.com", 
+    key=vault.key.hex(), 
+    chain_id=137, 
+    signature_type=1, 
+    funder=vault.address
+)
 
-# --- 4. ENGINE: 100% ID ACCURACY ---
+# --- 4. THE DATA BRIDGE: GAMMA TO CLOB ---
+
 async def force_scour():
+    """Bridges Gamma Discovery to CLOB Execution by mapping outcome labels to IDs."""
     global OMNI_STRIKE_CACHE
+    gamma_url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id=10"
     try:
-        url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id=10"
-        resp = await asyncio.to_thread(requests.get, url, timeout=15)
+        resp = await asyncio.to_thread(requests.get, gamma_url, timeout=15)
         events = resp.json()
         valid_pool = []
 
@@ -80,30 +90,27 @@ async def force_scour():
             markets = e.get('markets', [])
             if not markets: continue
             
-            # Step 1: Navigate past 'Event' and 'Market' level IDs
             m = markets[0]
-            
-            # Step 2: Extract labels and CLOB Token IDs
+            # outcomes: e.g., ["Yes", "No"] 
+            # clobTokenIds: e.g., ["789...1", "789...2"]
             outcomes_raw = m.get('outcomes', '[]')
             outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
-            tids = m.get('clobTokenIds', []) 
+            tids = m.get('clobTokenIds', [])
             
             if not tids or len(tids) < 2: continue
 
-            # Step 3: THE FIX - Sync "Yes" label to correct numeric ID index
-            final_token_id = None
+            # SYNC: Match 'Yes/Up/Over' label to the specific numeric index in tids
+            final_asset_id = None
             for i, label in enumerate(outcomes):
-                if label.lower() in ['yes', 'over', 'up', 'more']:
-                    final_token_id = str(tids[i]) # Force 78-digit numeric string
+                if label.lower() in ['yes', 'over', 'up', 'more', 'higher']:
+                    final_asset_id = str(tids[i]) # Force 78-digit numeric string
                     break
             
-            # Fallback to index 0 (standard for Yes)
-            if not final_token_id:
-                final_token_id = str(tids[0])
+            if not final_asset_id: final_asset_id = str(tids[0])
 
             valid_pool.append({
                 "name": e.get('title')[:22],
-                "token_id": final_token_id,
+                "token_id": final_asset_id,
                 "vol": float(e.get('volumeNum', 0))
             })
 
@@ -112,24 +119,27 @@ async def force_scour():
         return True
     except: return False
 
-# --- 5. INTERFACE & EXECUTION ---
+# --- 5. UI HANDLERS ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
     await update.message.reply_text(f"{LOGO}\n<b>APEX READY</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
-    if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
+    text = update.message.text
+    if text in ['⚔️ START SNIPER', '🔄 REFRESH']:
         await force_scour()
         if not OMNI_STRIKE_CACHE:
-            await update.message.reply_text("☢️ NO SIGNAL: CHECK API")
+            await update.message.reply_text("☢️ NO SIGNAL: API SYNC ERROR")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text("🌌 <b>TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif update.message.text == '⚙️ CALIBRATE':
+        await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif text == '⚙️ CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text("⚙️ <b>LOAD:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif update.message.text == '💳 VAULT':
+        await update.message.reply_text("⚙️ <b>LOAD ATOMIC STRIKE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif text == '💳 VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
         raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
         await update.message.reply_text(f"⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n💵 USDC: <code>${raw_usdc/1e6:.2f}</code>", parse_mode='HTML')
@@ -144,7 +154,7 @@ async def handle_callback(update, context):
         stake = float(context.user_data.get('stake', 10))
         await query.edit_message_text(f"🚀 <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
         try:
-            # Place Order with numeric ID and EOA Signature (Type 1)
+            # Place Order with numeric Asset Token ID and Type 1 Signature
             order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(
                 token_id=target['token_id'], amount=stake, side=BUY
             ))
