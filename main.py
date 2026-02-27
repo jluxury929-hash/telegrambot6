@@ -8,10 +8,21 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from google import genai
 
-# Polymarket Specifics - UPDATED FOR SIDE ENUM
+# Polymarket Specifics - UNIVERSAL IMPORT STRATEGY
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType, Side
+from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.constants import POLYGON
+
+# Fallback for BUY/SELL constants to prevent ImportErrors
+try:
+    from py_clob_client.constants import BUY, SELL
+except ImportError:
+    try:
+        from py_clob_client.clob_types import BUY, SELL
+    except ImportError:
+        # Final fallback: PolyMarket API uses these strings
+        BUY = "BUY"
+        SELL = "SELL"
 
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
@@ -27,7 +38,7 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v2.1.2-ENUM-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v2.1.3-HYBRID-FIX</code>
 """
 
 # --- 2. HYDRA RPC ENGINE ---
@@ -65,14 +76,11 @@ def get_vault():
             return Account.from_mnemonic(seed)
         key_str = seed if (seed.startswith("0x") or len(seed) == 64) else "0x" + seed
         return Account.from_key(key_str)
-    except Exception as e:
-        print(f"Vault Error: {e}")
-        return None
+    except: return None
 
 vault = get_vault()
 
 def init_clob():
-    """Initializes the Polymarket CLOB client."""
     client = ClobClient(
         host="https://clob.polymarket.com", 
         key=vault.key.hex(), 
@@ -80,7 +88,6 @@ def init_clob():
         signature_type=2, 
         funder=vault.address
     )
-    # Set API credentials
     client.set_api_creds(client.create_or_derive_api_creds())
     return client
 
@@ -161,57 +168,45 @@ async def main_handler(update, context):
         await update.message.reply_text(report, parse_mode='HTML')
 
 async def handle_callback(update, context):
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
    
     if "INTEL_" in query.data:
-        idx = int(query.data.split("_")[1])
-        target = context.user_data['paths'][idx]
-        report = (
-            f" <b>TECHNICAL INTEL REPORT</b>\n"
-            f"━━━━━━━━━━━━━━\n"
-            f" <b>MARKET:</b> {target['name']}\n"
-            f" <b>QUESTION:</b> <i>{target['q']}</i>\n\n"
-            f" <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
-            f" <b>EST. PRICE:</b> <code>${target['price']:.3f}</code>\n"
-            f"━━━━━━━━━━━━━━\n"
-            f" <i>Atomic Strike executes on 'Yes' outcome.</i>"
-        )
+        idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
+        report = (f" <b>TECHNICAL INTEL REPORT</b>\n━━━━━━━━━━━━━━\n"
+                  f" <b>MARKET:</b> {target['name']}\n"
+                  f" <b>QUESTION:</b> <i>{target['q']}</i>\n\n"
+                  f" <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
+                  f" <b>EST. PRICE:</b> <code>${target['price']:.3f}</code>\n"
+                  f"━━━━━━━━━━━━━━\n"
+                  f" <i>Atomic Strike executes on 'Yes' outcome.</i>")
         kb = [[InlineKeyboardButton(" EXECUTE ATOMIC STRIKE", callback_data=f"EXEC_{idx}")]]
         await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif "SET_" in query.data:
-        val = int(query.data.split("_")[1])
-        context.user_data['stake'] = val
+        val = int(query.data.split("_")[1]); context.user_data['stake'] = val
         await query.edit_message_text(f" <b>STRIKE LOAD: ${val} USDC</b>")
 
     elif "EXEC_" in query.data:
-        idx = int(query.data.split("_")[1])
-        target = context.user_data['paths'][idx]
+        idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
-        
         status_msg = await context.bot.send_message(query.message.chat_id, " <b>INITIATING ATOMIC STRIKE...</b>", parse_mode='HTML')
         
         try:
-            # Step 1: MarketOrderArgs using Side.BUY enum
+            # We use the 'BUY' variable which is now safely handled by our fallback logic
             order_args = MarketOrderArgs(
                 token_id=str(target['token_id']),
                 amount=stake,
-                side=Side.BUY
+                side=BUY
             )
             
             signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
             resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
             
-            if resp.get("success"):
-                msg = f"✅ <b>SUCCESS</b>\nOrder ID: <code>{resp.get('orderID')}</code>"
-            else:
-                msg = f"❌ <b>FAILED:</b> {resp.get('errorMsg') or 'Unknown Rejection'}"
-            
+            msg = f"✅ <b>SUCCESS</b>\nID: <code>{resp.get('orderID')}</code>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             await status_msg.edit_text(msg, parse_mode='HTML')
             
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ <b>EXECUTION ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
+            await status_msg.edit_text(f"⚠️ <b>FATAL EXECUTION ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
