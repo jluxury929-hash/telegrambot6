@@ -1,21 +1,18 @@
-import os, asyncio, json, time, requests, re
+import os, asyncio, json, random, time, requests
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 from eth_account import Account
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# --- 1. CORE CONFIG ---
+# --- 1. CORE CONFIG & VISUALS ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
-
-USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
@@ -23,47 +20,29 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v170-HYDRA-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v180-INTEL</code>
 """
 
-# --- 2. HYDRA RPC ENGINE (FIXES FATAL CONNECTION ERROR) ---
-def get_hydra_w3():
-    """Forces a connection by cycling nodes until a pulse is found."""
-    # 2026 Updated High-Availability RPC List
-    rpc_endpoints = [
-        os.getenv("RPC_URL"),
-        "https://polygon-rpc.com",
-        "https://rpc.ankr.com/polygon",
-        "https://polygon.llamarpc.com",
-        "https://1rpc.io/matic",
-        "https://polygon.drpc.org",
-        "https://poly-rpc.gateway.pokt.network"
-    ]
-    
-    for url in rpc_endpoints:
+# --- 2. HARDENED CONNECTION & AUTH ---
+def get_hardened_w3():
+    rpc_list = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
+    for url in rpc_list:
         if not url: continue
         try:
-            print(f"📡 Probing Node: {url[:30]}...")
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 8}))
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                print(f"✅ HYDRA PULSE DETECTED: Node Active.")
                 return _w3
-        except:
-            continue
+        except: continue
     return None
 
-# Attempting connection
-w3 = get_hydra_w3()
-if w3 is None:
-    print("☢️ ERROR: Hydra Engine could not secure a pulse. Retrying in 5s...")
-    # In a container, we want to crash and let the restart policy handle it
-    import sys; sys.exit(1)
+w3 = get_hardened_w3()
+USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
-# --- 3. AUTH & CLOB ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -74,92 +53,109 @@ def get_vault():
 
 vault = get_vault()
 
+# CLOB SDK Initialization
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-# --- 4. THE DATA BRIDGE (GAMMA DISCOVERY -> CLOB NATIVE ID) ---
+def init_clob():
+    client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
+    client.set_api_creds(client.create_or_derive_api_creds())
+    return client
 
+clob_client = init_clob()
 
-async def get_verified_clob_id(condition_id):
-    """Bypasses Gamma's data structure to get 100% accurate IDs from the Trading Engine."""
-    try:
-        url = f"https://clob.polymarket.com/markets/{condition_id}"
-        resp = await asyncio.to_thread(requests.get, url, timeout=10)
-        data = resp.json()
-        # Strictly extract 'Yes' outcome Token ID from the Order Book itself
-        for token in data.get('tokens', []):
-            if token.get('outcome', '').lower() == 'yes':
-                return str(token.get('token_id'))
-    except: return None
-
+# --- 3. DATA HARVESTING ---
 async def force_scour():
-    """AI-Organized Discovery with CLOB-Native Verification."""
     global OMNI_STRIKE_CACHE
-    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30&tag_id=10"
     try:
-        resp = await asyncio.to_thread(requests.get, url, timeout=12)
-        events = resp.json()
-        validated_pool = []
-
-        for e in events:
+        url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id=10"
+        resp = requests.get(url, timeout=12).json()
+        raw_data = []
+        for e in resp:
             m = e.get('markets', [])
-            if m and m[0].get('conditionId'):
-                cond_id = m[0]['conditionId']
-                # Cross-verify ID with the actual trading engine
-                v_tid = await get_verified_clob_id(cond_id)
-                if v_tid:
-                    validated_pool.append({
-                        "name": e.get('title')[:22],
-                        "token_id": v_tid,
-                        "vol": float(e.get('volumeNum', 0))
-                    })
+            if m and m[0].get('clobTokenIds'):
+                raw_data.append({
+                    "title": e.get('title'),
+                    "q": m[0].get('question'),
+                    "tids": m[0].get('clobTokenIds'),
+                    "outcomes": m[0].get('outcomes')
+                })
 
-        validated_pool.sort(key=lambda x: x['vol'], reverse=True)
-        OMNI_STRIKE_CACHE = validated_pool[:8]
+        prompt = (f"Analyze {json.dumps(raw_data[:15])}. Pick 8 winners. "
+                  "Identify the 78-digit ID for 'Yes'. Return JSON ONLY: "
+                  "[{'name': 'ShortName', 'q': 'FullQuestion', 'token_id': 'ID'}]")
+        
+        ai_resp = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-1.5-flash", contents=prompt, config={'response_mime_type': 'application/json'})
+        winners = json.loads(ai_resp.text)
+        if winners: OMNI_STRIKE_CACHE = winners
         return True
     except: return False
 
-# --- 5. UI & ATOMIC EXECUTION ---
+# --- 4. TELEGRAM INTERFACE ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA SYSTEM READY</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>AI OVERLORD ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
-    if update.message.text in ['⚔️ START SNIPER', '🔄 REFRESH']:
-        msg = await update.message.reply_text("🌀 <b>PULSING HYDRA NODES...</b>")
-        success = await force_scour()
-        await msg.delete()
-        if not success or not OMNI_STRIKE_CACHE:
-            await update.message.reply_text("☢️ <b>API BRIDGE TIMEOUT.</b>")
-            return
-        kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"HIT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+    text = update.message.text
+    if text in ['⚔️ START SNIPER', '🔄 REFRESH']:
+        await force_scour()
+        kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"INTEL_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text("🌌 <b>AI-VALIDATED TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("🌌 <b>TARGETS IDENTIFIED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    
+    elif text == '⚙️ CALIBRATE':
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
+        await update.message.reply_text("⚙️ <b>LOAD ATOMIC STRIKE (CAD):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif text == '💳 VAULT':
+        raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
+        raw_usdc = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
+        report = (f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n"
+                  f"⛽ POL: <code>{w3.from_wei(raw_pol, 'ether'):.4f}</code>\n"
+                  f"💵 USDC: <code>${raw_usdc/1e6:.2f}</code>\n"
+                  f"🆔: <code>{vault.address[:10]}...</code>")
+        await update.message.reply_text(report, parse_mode='HTML')
 
 async def handle_callback(update, context):
     query = update.callback_query; await query.answer()
-    if "HIT_" in query.data:
+    
+    if "SET_" in query.data:
+        val = int(query.data.split("_")[1]); context.user_data['stake'] = val
+        await query.edit_message_text(f"✅ <b>STRIKE LOAD: ${val} CAD</b>", parse_mode='HTML')
+
+    elif "INTEL_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
-        kb = [[InlineKeyboardButton("✅ CONFIRM & ATOMIC STRIKE", callback_data=f"EXEC_{idx}")]]
-        await query.edit_message_text(f"🚀 <b>TARGET:</b> {target['name']}\n🆔 <b>CLOB_ID:</b> <code>{target['token_id']}</code>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        # Get live price data for the description
+        try:
+            mid = float(await asyncio.to_thread(clob_client.get_midpoint, target['token_id']))
+        except: mid = 0.0
+        
+        intel_report = (
+            f"📡 <b>TARGET INTEL REPORT</b>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🔹 <b>MARKET:</b> {target['name']}\n"
+            f"📝 <b>QUESTION:</b> <i>{target['q']}</i>\n"
+            f"🆔 <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
+            f"💹 <b>EST. PRICE:</b> <code>${mid:.3f}</code>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <i>Verify ID before Atomic Strike.</i>"
+        )
+        kb = [[InlineKeyboardButton("🚀 EXECUTE ATOMIC STRIKE", callback_data=f"EXEC_{idx}")]]
+        await query.edit_message_text(intel_report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif "EXEC_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
-        stake = float(context.user_data.get('stake', 10))
-        
-        # Fresh client initialization to avoid timestamp drift
-        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
-        
+        stake = float(context.user_data.get('stake', 50))
+        await query.edit_message_text(f"⚡ <b>STRIKING:</b> <code>{target['name']}</code>", parse_mode='HTML')
         try:
-            order = await asyncio.to_thread(client.create_market_order, MarketOrderArgs(
-                token_id=str(target['token_id']), amount=stake, side=BUY
-            ))
-            resp = await asyncio.to_thread(client.post_order, order, OrderType.FOK)
-            msg = "✅ SUCCESS" if resp.get("success") else f"❌ FAIL: {resp.get('errorMsg')}"
+            order = await asyncio.to_thread(clob_client.create_market_order, MarketOrderArgs(token_id=target['token_id'], amount=stake, side=BUY))
+            resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
+            msg = "✅ <b>STRIKE SUCCESSFUL</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             await context.bot.send_message(query.message.chat_id, msg, parse_mode='HTML')
         except Exception as e:
-            await context.bot.send_message(query.message.chat_id, f"☢️ ERROR: {str(e)[:100]}", parse_mode='HTML')
+            await context.bot.send_message(query.message.chat_id, f"☢️ <b>ERROR:</b> {str(e)[:50]}", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
