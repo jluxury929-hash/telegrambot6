@@ -28,7 +28,7 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v226-FINAL-PATCH</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v226-FIX-SIZE-ATTR</code>
 """
 
 # --- 2. HYDRA ENGINE ---
@@ -40,6 +40,7 @@ def get_hydra_w3():
             _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                print(f"✅ Hydra Connected: {url[:25]}")
                 return _w3
         except: continue
     return None
@@ -63,7 +64,7 @@ vault = get_vault()
 clob_client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
 clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
 
-# --- 4. DATA BRIDGE ---
+# --- 4. DATA BRIDGE (NUMPY ENHANCED) ---
 async def fetch_market_data(cond_id):
     try:
         url = f"https://clob.polymarket.com/markets/{cond_id}"
@@ -149,7 +150,6 @@ async def handle_query(update, context):
         stake = float(context.user_data.get('stake', 10))
         
         try:
-            # --- PATCHED EXECUTION LOGIC ---
             # 1. Prepare Market Order Args
             order_args = MarketOrderArgs(
                 token_id=str(target['token_id']), 
@@ -158,7 +158,11 @@ async def handle_query(update, context):
                 price=0.999
             )
             
-            # 2. Local Signing (Handles size/amount attribute translation internally)
+            # --- PATCH: Manual injection of 'size' attribute ---
+            # For Market Orders, amount and size are functionally the same during the signing check
+            setattr(order_args, 'size', stake)
+
+            # 2. Local Signing
             signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
             
             # 3. Post to CLOB
@@ -178,7 +182,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
-    print("🚀 Hydra Pulse Active."); app.run_polling()
+    print("🚀 Hydra Pulse Active. Scanning for targets..."); app.run_polling()
 
 
 
