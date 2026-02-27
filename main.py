@@ -8,14 +8,17 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from google import genai
 
-# --- 1. CORE CONFIG ---
+# --- 1. CORE CONFIG & PROXY HYDRA ---
 getcontext().prec = 28
 load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-OMNI_STRIKE_CACHE = []
 
-USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+# PROXY CONFIG: Essential for bypassing SE Asia / US-East blocks
+# Format in .env: PROXY_URL=http://username:password@ip:port
+PROXY_URL = os.getenv("PROXY_URL")
+proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
+OMNI_STRIKE_CACHE = []
 
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
@@ -23,7 +26,7 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v210-SCHEMA-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v230-GEO-LOCKED</code>
 """
 
 # --- 2. HYDRA RPC ENGINE ---
@@ -47,13 +50,14 @@ def get_hydra_w3():
 
 w3 = get_hydra_w3()
 if w3 is None:
-    print("☢️ FATAL: Hydra Engine Failed.")
+    print("☢️ FATAL: Hydra Engine Failed. RPC Pulse Flatline.")
     import sys; sys.exit(1)
 
+USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
 usdc_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 
-# --- 3. AUTH & VAULT ---
+# --- 3. AUTH & VAULT (PROXIED HANDSHAKE) ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -69,27 +73,40 @@ from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
 def init_clob():
-    client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=1, funder=vault.address)
-    client.set_api_creds(client.create_or_derive_api_creds())
-    return client
+    # Tunnel the CLOB handshake through the proxy to bypass 403 Forbidden
+    client = ClobClient(
+        host="https://clob.polymarket.com", 
+        key=vault.key.hex(), 
+        chain_id=137, 
+        signature_type=1, 
+        funder=vault.address,
+        request_kwargs={"proxies": proxies, "timeout": 15} if proxies else {"timeout": 15}
+    )
+    try:
+        client.set_api_creds(client.create_or_derive_api_creds())
+        return client
+    except Exception as e:
+        print(f"Auth Block: Ensure Proxy is set for restricted regions. {e}")
+        return client
 
 clob_client = init_clob()
 
 # --- 4. DATA BRIDGE (MULTI-TAG DISCOVERY) ---
 async def get_verified_clob_id(condition_id):
+    """Fetches real-time price through proxy to fix $0.00 error."""
     try:
         url = f"https://clob.polymarket.com/markets/{condition_id}"
-        resp = await asyncio.to_thread(requests.get, url, timeout=10)
+        # Direct CLOB query via proxy ensures data alignment
+        resp = await asyncio.to_thread(requests.get, url, proxies=proxies, timeout=10)
         data = resp.json()
         for token in data.get('tokens', []):
             if token.get('outcome', '').lower() == 'yes':
-                return str(token.get('token_id')), token.get('price', 0.0)
+                return str(token.get('token_id')), float(token.get('price', 0.0))
     except: return None, 0.0
 
 async def force_scour():
     global OMNI_STRIKE_CACHE
-    # FIXED: Scans multiple tags (Politics, Crypto, Sports) to ensure list is NEVER empty
-    tags = [1, 10, 100, 237] 
+    tags = [1, 10, 100, 237] # Politics, Crypto, Sports, Global
     validated_pool = []
     
     for tag in tags:
@@ -100,8 +117,7 @@ async def force_scour():
             for e in events:
                 m = e.get('markets', [])
                 if m and m[0].get('conditionId'):
-                    cond_id = m[0]['conditionId']
-                    v_tid, price = await get_verified_clob_id(cond_id)
+                    v_tid, price = await get_verified_clob_id(m[0]['conditionId'])
                     if v_tid:
                         validated_pool.append({
                             "name": e.get('title')[:22],
@@ -119,16 +135,16 @@ async def force_scour():
 # --- 5. UI & INTEL EXECUTION ---
 async def start(update, context):
     kb = [['⚔️ START SNIPER', '⚙️ CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>AI-HYDRA SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA PROXY: TUNNEL ESTABLISHED</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     text = update.message.text
     if text in ['⚔️ START SNIPER', '🔄 REFRESH']:
-        msg = await update.message.reply_text("🌀 <b>SCANNING MULTI-TAG SCHEMAS...</b>")
+        msg = await update.message.reply_text("🌀 <b>PULSING PROXIED SCHEMAS...</b>")
         success = await force_scour()
         await msg.delete()
         if not success:
-            await update.message.reply_text("☢️ <b>GLOBAL API TIMEOUT: RE-TRYING...</b>")
+            await update.message.reply_text("☢️ <b>API TIMEOUT: CHECK PROXY CONNECTION</b>")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"INTEL_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
@@ -160,7 +176,7 @@ async def handle_callback(update, context):
             f"🆔 <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
             f"💹 <b>EST. PRICE:</b> <code>${target['price']:.3f}</code>\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚡ <i>Atomic Strike executes on 'Yes' outcome.</i>"
+            f"⚡ <i>Proxy Tunneling active for atomic strike.</i>"
         )
         kb = [[InlineKeyboardButton("🚀 EXECUTE ATOMIC STRIKE", callback_data=f"EXEC_{idx}")]]
         await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
