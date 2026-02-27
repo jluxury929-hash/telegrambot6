@@ -18,7 +18,7 @@ load_dotenv()
 ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
 
-# POLYMARKET USES USDC.e (Bridged) - 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+# POLYMARKET REQUIRES USDC.e (Bridged)
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
@@ -28,7 +28,7 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-PRO-GUARD</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-PRO-GUARD-FIXED</code>
 """
 
 # --- 2. HYDRA ENGINE ---
@@ -129,6 +129,10 @@ async def main_handler(update, context):
         bal = await asyncio.to_thread(usdc_contract.functions.balanceOf(vault.address).call)
         await update.message.reply_text(f"<b>VAULT</b>\nADDR: <code>{vault.address}</code>\nUSDC.e: ${bal/1e6:.2f}", parse_mode='HTML')
 
+    elif 'CALIBRATE' in cmd:
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
+        await update.message.reply_text("📊 <b>SET STRIKE SIZE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     
@@ -145,12 +149,12 @@ async def handle_query(update, context):
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         stake = float(context.user_data.get('stake', 10))
         
-        # --- SMART CONTRACT ALLOWANCE GUARD ---
+        # --- ALLOWANCE GUARD CHECK ---
         allowance = await asyncio.to_thread(usdc_contract.functions.allowance(vault.address, CTF_EXCHANGE).call)
         if allowance < (stake * 1e6):
             kb = [[InlineKeyboardButton("📝 APPROVE SMART CONTRACT", callback_data="APPROVE_CONTRACT")]]
             await context.bot.send_message(q.message.chat_id, 
-                "⚠️ <b>PERMISSION REQUIRED</b>\nThe Polymarket Smart Contract is not authorized to spend your USDC yet. Do you want to grant permission?", 
+                "⚠️ <b>PERMISSION REQUIRED</b>\nThe Polymarket Smart Contract is not authorized to spend your USDC.e yet.", 
                 reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             return
 
@@ -168,15 +172,15 @@ async def handle_query(update, context):
     elif q.data == "APPROVE_CONTRACT":
         m = await q.edit_message_text("🔄 <b>INITIATING APPROVAL...</b>", parse_mode='HTML')
         try:
-            # Build and sign the approval transaction
             tx = usdc_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
                 'from': vault.address,
                 'nonce': w3.eth.get_transaction_count(vault.address),
                 'gasPrice': w3.eth.gas_price
             })
             signed_tx = w3.eth.account.sign_transaction(tx, vault.key)
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            await m.edit_text(f"✅ <b>APPROVAL BROADCASTED</b>\nTransaction Hash: <code>{tx_hash.hex()[:25]}...</code>\n\n<i>Wait 15 seconds for Polygon to confirm, then strike again!</i>", parse_mode='HTML')
+            # FIX: Use 'raw_transaction' for newer web3 versions
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            await m.edit_text(f"✅ <b>APPROVAL BROADCASTED</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>\n\n<i>Wait 15s then strike again!</i>", parse_mode='HTML')
         except Exception as e:
             await m.edit_text(f"❌ <b>APPROVAL FAILED:</b> {str(e)[:50]}", parse_mode='HTML')
 
