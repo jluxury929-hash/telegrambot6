@@ -8,21 +8,19 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from google import genai
 
-# Polymarket Specifics - UNIVERSAL IMPORT STRATEGY
+# Polymarket Specifics
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 
-# Fallback for BUY/SELL constants to prevent ImportErrors
+# Universal fix for the BUY/SELL import error
 try:
-    from py_clob_client.constants import BUY, SELL
+    from py_clob_client.clob_types import BUY
 except ImportError:
     try:
-        from py_clob_client.clob_types import BUY, SELL
+        from py_clob_client.order_builder.constants import BUY
     except ImportError:
-        # Final fallback: PolyMarket API uses these strings
         BUY = "BUY"
-        SELL = "SELL"
 
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
@@ -38,7 +36,7 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v2.1.3-HYBRID-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v211-SIG-FIXED</code>
 """
 
 # --- 2. HYDRA RPC ENGINE ---
@@ -72,22 +70,22 @@ def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     try:
-        if " " in seed: 
-            return Account.from_mnemonic(seed)
-        key_str = seed if (seed.startswith("0x") or len(seed) == 64) else "0x" + seed
-        return Account.from_key(key_str)
+        if " " in seed: return Account.from_mnemonic(seed)
+        return Account.from_key(seed if (seed.startswith("0x") or len(seed)==64) else "0x"+seed)
     except: return None
 
 vault = get_vault()
 
 def init_clob():
+    # FIXED: signature_type must be 2 for EIP-712 (The 'Invalid Signature' fix)
     client = ClobClient(
         host="https://clob.polymarket.com", 
         key=vault.key.hex(), 
-        chain_id=POLYGON, 
+        chain_id=137, 
         signature_type=2, 
         funder=vault.address
     )
+    # This derives the necessary API keys from your wallet signature
     client.set_api_creds(client.create_or_derive_api_creds())
     return client
 
@@ -101,7 +99,7 @@ async def get_verified_clob_id(condition_id):
         data = resp.json()
         for token in data.get('tokens', []):
             if token.get('outcome', '').lower() == 'yes':
-                return str(token.get('token_id')), float(token.get('price', 0.0))
+                return str(token.get('token_id')), token.get('price', 0.0)
     except: return None, 0.0
     return None, 0.0
 
@@ -132,31 +130,27 @@ async def force_scour():
     OMNI_STRIKE_CACHE = validated_pool[:8]
     return True if validated_pool else False
 
-# --- 5. UI & EXECUTION ---
+# --- 5. UI & INTEL EXECUTION ---
 async def start(update, context):
     kb = [[' START SNIPER', ' CALIBRATE'], [' VAULT', ' REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>AI-HYDRA SYSTEM ONLINE</b>", 
-                                   reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), 
-                                   parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>AI-HYDRA SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     text = update.message.text
     if text in [' START SNIPER', ' REFRESH']:
-        msg = await update.message.reply_text(" <b>SCANNING MULTI-TAG SCHEMAS...</b>")
+        msg = await update.message.reply_text(" SCANNING MULTI-TAG SCHEMAS...")
         success = await force_scour()
         await msg.delete()
         if not success:
-            await update.message.reply_text(" <b>GLOBAL API TIMEOUT: RE-TRYING...</b>")
+            await update.message.reply_text(" GLOBAL API TIMEOUT: RE-TRYING...")
             return
         kb = [[InlineKeyboardButton(f"₿ {p['name']}", callback_data=f"INTEL_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
         context.user_data['paths'] = OMNI_STRIKE_CACHE
-        await update.message.reply_text(" <b>TARGETS IDENTIFIED:</b>", 
-                                       reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text(" TARGETS IDENTIFIED:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
    
     elif text == ' CALIBRATE':
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text(" <b>LOAD ATOMIC STRIKE (USDC):</b>", 
-                                       reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text(" LOAD ATOMIC STRIKE (USDC):", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif text == ' VAULT':
         raw_pol = await asyncio.to_thread(w3.eth.get_balance, vault.address)
@@ -172,13 +166,15 @@ async def handle_callback(update, context):
    
     if "INTEL_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
-        report = (f" <b>TECHNICAL INTEL REPORT</b>\n━━━━━━━━━━━━━━\n"
-                  f" <b>MARKET:</b> {target['name']}\n"
-                  f" <b>QUESTION:</b> <i>{target['q']}</i>\n\n"
-                  f" <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
-                  f" <b>EST. PRICE:</b> <code>${target['price']:.3f}</code>\n"
-                  f"━━━━━━━━━━━━━━\n"
-                  f" <i>Atomic Strike executes on 'Yes' outcome.</i>")
+        report = (
+            f" <b>TECHNICAL INTEL REPORT</b>\n━━━━━━━━━━━━━━\n"
+            f" <b>MARKET:</b> {target['name']}\n"
+            f" <b>QUESTION:</b> <i>{target['q']}</i>\n\n"
+            f" <b>ASSET ID:</b> <code>{target['token_id']}</code>\n"
+            f" <b>EST. PRICE:</b> <code>${target['price']:.3f}</code>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f" <i>Atomic Strike executes on 'Yes' outcome.</i>"
+        )
         kb = [[InlineKeyboardButton(" EXECUTE ATOMIC STRIKE", callback_data=f"EXEC_{idx}")]]
         await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
@@ -189,31 +185,34 @@ async def handle_callback(update, context):
     elif "EXEC_" in query.data:
         idx = int(query.data.split("_")[1]); target = context.user_data['paths'][idx]
         stake = float(context.user_data.get('stake', 10))
-        status_msg = await context.bot.send_message(query.message.chat_id, " <b>INITIATING ATOMIC STRIKE...</b>", parse_mode='HTML')
+        
+        status_msg = await context.bot.send_message(query.message.chat_id, " <b>TRANSMITTING SIGNED ORDER...</b>", parse_mode='HTML')
         
         try:
-            # We use the 'BUY' variable which is now safely handled by our fallback logic
-            order_args = MarketOrderArgs(
-                token_id=str(target['token_id']),
-                amount=stake,
+            # Step 1: Create the signed order
+            order = await asyncio.to_thread(clob_client.create_order, MarketOrderArgs(
+                token_id=str(target['token_id']), 
+                amount=stake, 
                 side=BUY
-            )
+            ))
+            # Step 2: Post the signed order
+            resp = await asyncio.to_thread(clob_client.post_order, order, OrderType.FOK)
             
-            signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
-            resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
+            if resp.get("success"):
+                msg = f"✅ <b>SUCCESS</b>\nOrder ID: <code>{resp.get('orderID')}</code>"
+            else:
+                msg = f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             
-            msg = f"✅ <b>SUCCESS</b>\nID: <code>{resp.get('orderID')}</code>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}"
             await status_msg.edit_text(msg, parse_mode='HTML')
             
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ <b>FATAL EXECUTION ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
+            await status_msg.edit_text(f"⚠️ <b>SIGNATURE ERROR:</b> <code>{str(e)[:100]}</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("AI-HYDRA IS LIVE...")
     app.run_polling()
 
 
