@@ -8,9 +8,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from google import genai
 
-# Polymarket Specifics - FIXED IMPORTS HERE
+# Polymarket Specifics - UPDATED FOR SIDE ENUM
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType, BUY, SELL
+from py_clob_client.clob_types import MarketOrderArgs, OrderType, Side
 from py_clob_client.constants import POLYGON
 
 # --- 1. CORE CONFIG ---
@@ -27,7 +27,7 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v2.1.1-IMPORT-FIX</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v2.1.2-ENUM-FIX</code>
 """
 
 # --- 2. HYDRA RPC ENGINE ---
@@ -72,7 +72,7 @@ def get_vault():
 vault = get_vault()
 
 def init_clob():
-    """Initializes the Polymarket CLOB client with EIP-712 signing."""
+    """Initializes the Polymarket CLOB client."""
     client = ClobClient(
         host="https://clob.polymarket.com", 
         key=vault.key.hex(), 
@@ -80,6 +80,7 @@ def init_clob():
         signature_type=2, 
         funder=vault.address
     )
+    # Set API credentials
     client.set_api_creds(client.create_or_derive_api_creds())
     return client
 
@@ -192,10 +193,11 @@ async def handle_callback(update, context):
         status_msg = await context.bot.send_message(query.message.chat_id, " <b>INITIATING ATOMIC STRIKE...</b>", parse_mode='HTML')
         
         try:
+            # Step 1: MarketOrderArgs using Side.BUY enum
             order_args = MarketOrderArgs(
                 token_id=str(target['token_id']),
                 amount=stake,
-                side=BUY
+                side=Side.BUY
             )
             
             signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
