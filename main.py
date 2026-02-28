@@ -30,25 +30,35 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-ELITE-EMOJI</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-CRYPTO-ELITE</code>
 """
 
-# --- 2. HYDRA ENGINE ---
+# --- 2. HYDRA ENGINE (RPC RESILIENCE) ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    endpoints = [
+        os.getenv("RPC_URL"), 
+        "https://polygon-rpc.com", 
+        "https://rpc.ankr.com/polygon",
+        "https://1rpc.io/matic",
+        "https://polygon.llamarpc.com",
+        "https://rpc-mainnet.maticvigil.com"
+    ]
     for url in endpoints:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 20}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                print(f"🔗 Hydra Node Connected: {url[:25]}...")
                 return _w3
-        except: continue
+        except:
+            time.sleep(1) # Safety gap between retries
+            continue
     return None
 
 w3 = get_hydra_w3()
 if not w3:
-    print("FATAL: RPC Failure."); sys.exit(1)
+    print("FATAL: RPC Failure. All nodes saturated."); sys.exit(1)
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 UNISWAP_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
@@ -113,7 +123,7 @@ async def check_win_status(context):
 async def force_scour():
     global OMNI_STRIKE_CACHE
     url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100"
-    crypto_mesh = ['btc', 'bitcoin', 'eth', 'ethereum', 'solana', 'sol', 'bnb', 'xrp', 'crypto', 'coin', 'token', 'price']
+    crypto_mesh = ['btc', 'bitcoin', 'eth', 'ethereum', 'solana', 'sol', 'bnb', 'xrp', 'crypto', 'coin', 'token', 'price', 'altcoin']
     raw_results = []
     try:
         resp = await asyncio.to_thread(requests.get, url, timeout=5)
@@ -144,7 +154,7 @@ async def force_scour():
 # --- 5. UI HANDLERS ---
 async def start(update, context):
     btns = [['🚀 START SNIPER', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>⚡ HYDRA CRYPTO-ORACLE ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>⚡ HYDRA CRYPTO-ELITE ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
@@ -153,11 +163,11 @@ async def main_handler(update, context):
         if await force_scour():
             kb = [[InlineKeyboardButton(f"🎯 {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
             await m.edit_text("<b>🛰️ ACTIVE CRYPTO TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("⚠️ <b>NO CRYPTO MARKETS FOUND.</b>")
+        else: await m.edit_text("⚠️ <b>NO HIGH-VOLUME CRYPTO FOUND.</b>")
     elif 'VAULT' in cmd:
         n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(vault.address).call)
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(vault.address).call)
-        msg = (f"<b>🏦 VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Address:</b> <code>{vault.address}</code>\n\n<b>USDC.e:</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}")
+        msg = (f"<b>🏦 VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Address:</b> <code>{vault.address}</code>\n\n<b>USDC.e (Bridged):</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}")
         kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
@@ -205,7 +215,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("⚡ Hydra Crypto Pulse Active."); app.run_polling()
+    print("⚡ Hydra Crypto Elite Active."); app.run_polling()
 
 
 
