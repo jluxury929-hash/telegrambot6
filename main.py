@@ -1,4 +1,4 @@
-mport os, asyncio, json, time, requests, numpy as np, sys
+import os, asyncio, json, time, requests, numpy as np, sys
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 from eth_account import Account
