@@ -30,7 +30,7 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-ELITE-INTEGRATED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-CALIBRATE-FIX</code>
 """
 
 # --- 2. HYDRA ENGINE ---
@@ -47,6 +47,9 @@ def get_hydra_w3():
     return None
 
 w3 = get_hydra_w3()
+if not w3:
+    print("FATAL: RPC Failure."); import sys; sys.exit(1)
+
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 UNISWAP_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
 
@@ -58,7 +61,8 @@ swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
-    try: return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
+    try:
+        return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
     except: return None
 
 vault = get_vault()
@@ -69,7 +73,9 @@ def init_clob():
         client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=vault.address)
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
-    except: return None
+    except Exception as e:
+        print(f"Auth derivation failed: {e}")
+        return None
 
 clob_client = init_clob()
 
@@ -109,8 +115,8 @@ async def force_scour():
 
 # --- 5. UI HANDLERS ---
 async def start(update, context):
-    btns = [['🚀 START SNIPER', '⚙️ CALIBRATE'], ['🔒 VAULT', '🔄 REFRESH'], ['📦 PORTFOLIO', '📜 TRADES']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA-AI ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [['🚀 START SNIPER', '⚙️ CALIBRATE'], ['🔒 VAULT', '🔄 REFRESH']]
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA-AI SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
@@ -125,32 +131,10 @@ async def main_handler(update, context):
         n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(vault.address).call)
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(vault.address).call)
         msg = f"<b>VAULT CURRENCY AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e (Bridged):</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}"
-        kb = [[InlineKeyboardButton("⚡ CONVERT NATIVE TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1e6 else None
+        kb = []
+        if n_bal > 1000000:
+            kb.append([InlineKeyboardButton("⚡ CONVERT NATIVE TO USDC.e", callback_data="CONVERT_NATIVE")])
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
-
-    elif 'PORTFOLIO' in cmd:
-        try:
-            positions = await asyncio.to_thread(clob_client.get_positions)
-            report = "<b>📦 ACTIVE POSITIONS</b>\n━━━━━━━━━━━━━━\n"
-            found = False
-            for p in positions:
-                if float(p.get('size', 0)) > 0:
-                    found = True
-                    report += f"🔹 {p.get('asset_id')[:10]}...: {p.get('size')} shares\n"
-            await update.message.reply_text(report if found else "<b>NO ACTIVE POSITIONS</b>", parse_mode='HTML')
-        except: await update.message.reply_text("⚠️ <b>FETCH ERROR</b>")
-
-    elif 'TRADES' in cmd:
-        try:
-            trades = await asyncio.to_thread(clob_client.get_trades)
-            report = "<b>📜 RECENT TRADE LOGS</b>\n━━━━━━━━━━━━━━\n"
-            if not trades:
-                await update.message.reply_text("<b>NO RECENT TRADES</b>", parse_mode='HTML')
-                return
-            for t in trades[:5]:
-                report += f"🔹 {t.get('side')} | ${t.get('price')} | {t.get('size')} shares\n"
-            await update.message.reply_text(report, parse_mode='HTML')
-        except: await update.message.reply_text("⚠️ <b>LOG ERROR</b>")
 
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
@@ -158,43 +142,240 @@ async def main_handler(update, context):
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    
+   
     if "SET_" in q.data:
-        val = int(q.data.split("_")[1]); context.user_data['stake'] = val
+        val = int(q.data.split("_")[1])
+        context.user_data['stake'] = val
         await q.edit_message_text(f"✅ <b>STRIKE LOADED: ${val} USDC</b>")
 
     elif q.data == "CONVERT_NATIVE":
+        m = await q.edit_message_text("🔄 <b>PREPARING UNISWAP ROUTE...</b>", parse_mode='HTML')
         try:
             n_bal = usdc_n_contract.functions.balanceOf(vault.address).call()
-            # Approve + Swap logic
-            tx = usdc_n_contract.functions.approve(UNISWAP_ROUTER, n_bal).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': w3.eth.gas_price})
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
-            await q.edit_message_text("✅ <b>SWAP BROADCASTED</b>")
-        except Exception as e: await q.edit_message_text(f"❌ <b>SWAP FAILED:</b> {e}")
+            allowance = usdc_n_contract.functions.allowance(vault.address, UNISWAP_ROUTER).call()
+            if allowance < n_bal:
+                tx = usdc_n_contract.functions.approve(UNISWAP_ROUTER, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': w3.eth.gas_price})
+                w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+                await m.edit_text("✅ <b>ROUTER APPROVED.</b> Click Convert again.")
+                return
+            params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": vault.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
+            tx = swap_router.functions.exactInputSingle(params).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': w3.eth.gas_price})
+            tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+            await m.edit_text(f"🚀 <b>CONVERSION SENT</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>")
+        except Exception as e:
+            await m.edit_text(f"❌ <b>CONVERSION FAILED:</b> {str(e)[:50]}")
 
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         kb = [[InlineKeyboardButton("⚡ EXECUTE ATOMIC STRIKE", callback_data=f"EXE_{idx}")]]
-        await q.edit_message_text(f"<b>TARGET:</b> {target['q']}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await q.edit_message_text(f"<b>TARGET:</b> {target['q']}\n<b>EST. PRICE:</b> ${target['price']}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         stake = float(context.user_data.get('stake', 10))
-        # Allowance Guard + Post order...
+        allowance = await asyncio.to_thread(usdc_e_contract.functions.allowance(vault.address, CTF_EXCHANGE).call)
+        if allowance < (stake * 1e6):
+            kb = [[InlineKeyboardButton("📝 APPROVE SMART CONTRACT", callback_data="APPROVE_CONTRACT")]]
+            await context.bot.send_message(q.message.chat_id, "⚠️ <b>USDC.e PERMISSION REQUIRED</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            return
         try:
             order_args = MarketOrderArgs(token_id=str(target['token_id']), amount=stake, side=BUY, price=0.999)
             setattr(order_args, 'size', stake); setattr(order_args, 'expiration', 0)
-            signed = await asyncio.to_thread(clob_client.create_order, order_args)
-            resp = await asyncio.to_thread(clob_client.post_order, signed, OrderType.FOK)
-            await context.bot.send_message(q.message.chat_id, "✅ <b>SUCCESS</b>" if resp.get("success") else "❌ <b>FAILED</b>", parse_mode='HTML')
-        except Exception as e: await context.bot.send_message(q.message.chat_id, f"⚠️ <b>ERROR:</b> {e}", parse_mode='HTML')
+            signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
+            resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
+            await context.bot.send_message(q.message.chat_id, "✅ <b>SUCCESS</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}", parse_mode='HTML')
+        except Exception as e:
+            await context.bot.send_message(q.message.chat_id, f"⚠️ <b>SDK ERROR:</b> {str(e)}", parse_mode='HTML')
+
+    elif q.data == "APPROVE_CONTRACT":
+        try:
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': w3.eth.gas_price})
+            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+            await q.edit_message_text("✅ <b>USDC.e APPROVED!</b> Ready to strike.")
+        except Exception as e:
+            await q.edit_message_text(f"❌ <b>FAILED:</b> {e}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("🚀 Hydra Integrated Active."); app.run_polling()
+    print("🚀 Hydra Pulse Active."); app.run_polling()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
