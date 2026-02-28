@@ -140,7 +140,7 @@ async def main_handler(update, context):
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
         msg = (f"<b>🏦 VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n"
                f"<b>📍 Address:</b> <code>{v.address}</code>\n\n"
-               f"<b>💎 USDC.e (Bridged):</b> ${e_bal/1e6:.2f}\n"
+               f"<b>💎 USDC.e:</b> ${e_bal/1e6:.2f}\n"
                f"<b>💵 Native USDC:</b> ${n_bal/1e6:.2f}")
         kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
