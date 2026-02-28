@@ -35,7 +35,7 @@ LOGO = """
 
 # --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon", "https://1rpc.io/matic"]
+    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
     for url in endpoints:
         if not url: continue
         try:
@@ -58,25 +58,10 @@ usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 
 # --- 3. MULTI-USER VAULT LOGIC ---
-def get_vault(user_id=None):
-    # Minimal change: If user_id provided, derive unique key. Else, use .env default.
-    master = os.getenv("MASTER_KEY", os.getenv("WALLET_SEED", "DEFAULT_SECRET"))
-    if user_id:
-        seed = hashlib.sha256(f"{master}:{user_id}".encode()).hexdigest()
-        return Account.from_key(seed)
-    # Original fallback
-    Account.enable_unaudited_hdwallet_features()
-    try: return Account.from_mnemonic(master) if " " in master else Account.from_key(master)
-    except: return None
-
-def init_clob(user_vault=None):
-    target_vault = user_vault or get_vault()
-    try:
-        sig_type = int(os.getenv("SIGNATURE_TYPE", 0))
-        client = ClobClient(host="https://clob.polymarket.com", key=target_vault.key.hex(), chain_id=137, signature_type=sig_type, funder=target_vault.address)
-        client.set_api_creds(client.create_or_derive_api_creds())
-        return client
-    except: return None
+def get_vault(user_id):
+    master = os.getenv("MASTER_KEY", os.getenv("WALLET_SEED", "HYDRA_SECRET_2026"))
+    seed = hashlib.sha256(f"{master}:{user_id}".encode()).hexdigest()
+    return Account.from_key(seed)
 
 # --- 4. DATA BRIDGE & MONITOR ---
 async def fetch_market_data(cond_id):
@@ -89,30 +74,17 @@ async def fetch_market_data(cond_id):
                 return str(t.get('token_id')), float(t.get('price', 0.0))
     except: return None, 0.0
 
-async def check_win_status(context):
-    if not STRIKE_LOG: return
-    try:
-        for tid, data in list(STRIKE_LOG.items()):
-            r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/prices/history?token_id={tid}", timeout=5)
-            if r.status_code == 200:
-                history = r.json()
-                if history and float(history[-1].get('price', 0)) >= 0.99:
-                    profit = (data['stake'] / data['price']) - data['stake']
-                    msg = (f" <b>STRIKE RESOLVED: WINNER</b>\n━━━━━━━━━━━━━━\n"
-                           f"<b>Target:</b> {data['q']}\n<b>Net Profit:</b> +${profit:.2f} USDC")
-                    await context.bot.send_message(data['chat_id'], msg, parse_mode='HTML')
-                    del STRIKE_LOG[tid]
-    except: pass
-
 async def force_scour():
     global OMNI_STRIKE_CACHE
     url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100"
-    # Strict Price-Action Filter
+    
     price_ops = ['↑', '↓', 'above', 'below', 'reach', 'hit', '$', '>', '<']
     assets = ['btc', 'bitcoin', 'eth', 'ethereum', 'sol', 'bnb', 'xrp', 'price']
-    fluff = ['ceo', 'company', 'sec', 'partnership', 'acquired', 'etf']
+    corp_keys = ['ceo', 'company', 'sec', 'partnership', 'acquired', 'etf', 'buy']
     
-    raw_results = []
+    tier_1_price = []
+    tier_2_corp = []
+    
     try:
         resp = await asyncio.to_thread(requests.get, url, timeout=5)
         for e in resp.json():
@@ -120,32 +92,42 @@ async def force_scour():
             m_list = e.get('markets', [])
             if m_list: q = m_list[0].get('question', '').lower()
             
-            if any(a in title or a in q for a in assets) and \
-               any(op in title or op in q for op in price_ops) and \
-               not any(f in title for f in fluff):
+            # Filtering Logic
+            is_crypto = any(a in title or a in q for a in assets)
+            is_price = any(op in title or op in q for op in price_ops)
+            is_corp = any(f in title or f in q for f in corp_keys)
+            
+            if is_crypto:
                 tid, pr = await fetch_market_data(m_list[0].get('conditionId'))
                 if tid:
-                    raw_results.append({"title": e.get('title')[:25], "q": m_list[0].get('question'), "token_id": tid, "price": pr, "vol": float(e.get('volumeNum', 0))})
-        if raw_results:
-            raw_results.sort(key=lambda x: x['vol'], reverse=True)
-            OMNI_STRIKE_CACHE = raw_results[:10]
-            return True
+                    entry = {"title": e.get('title')[:25], "q": m_list[0].get('question'), "token_id": tid, "price": pr, "vol": float(e.get('volumeNum', 0))}
+                    if is_price and not is_corp:
+                        tier_1_price.append(entry)
+                    elif is_corp:
+                        tier_2_corp.append(entry)
+        
+        tier_1_price.sort(key=lambda x: x['vol'], reverse=True)
+        tier_2_corp.sort(key=lambda x: x['vol'], reverse=True)
+        
+        # Combine: Prices first, Companies second
+        OMNI_STRIKE_CACHE = (tier_1_price + tier_2_corp)[:12]
+        return True
     except: pass
     return False
 
 # --- 5. UI HANDLERS ---
 async def start(update, context):
     v = get_vault(update.effective_user.id)
-    btns = [[' START SNIPER', ' CALIBRATE'], [' VAULT', ' REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>Welcome {update.effective_user.first_name}</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [['🚀 START SNIPER', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
+    await update.message.reply_text(f"{LOGO}\n<b>Hydra Price-Elite Active</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd, uid = update.message.text, update.effective_user.id
     if 'START' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("🔭 <b>SCANNING...</b>", parse_mode='HTML')
+        m = await update.message.reply_text("🔭 <b>SCOURING CRYPTO PROTOCOLS...</b>", parse_mode='HTML')
         if await force_scour():
-            kb = [[InlineKeyboardButton(f" {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("<b>ACTIVE PRICE TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            kb = [[InlineKeyboardButton(f"🎯 {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+            await m.edit_text("<b>ACTIVE TARGETS (Price Action > Corporate):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'VAULT' in cmd:
         v = get_vault(uid)
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
@@ -156,13 +138,11 @@ async def main_handler(update, context):
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    v = get_vault(q.from_user.id)
+    uid = q.from_user.id
+    v = get_vault(uid)
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['stake'] = val
         await q.edit_message_text(f"✅ <b>STRIKE: ${val}</b>")
-    elif q.data == "CONVERT_NATIVE":
-        # (Uniswap logic preserved)
-        pass 
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         kb = [[InlineKeyboardButton("💥 EXECUTE", callback_data=f"EXE_{idx}")]]
@@ -171,7 +151,8 @@ async def handle_query(update, context):
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         stake = float(context.user_data.get('stake', 10))
         try:
-            client = init_clob(v)
+            client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
+            client.set_api_creds(client.create_or_derive_api_creds())
             args = MarketOrderArgs(token_id=str(target['token_id']), amount=stake, side=BUY, price=0.999)
             setattr(args, 'size', stake); setattr(args, 'expiration', 0)
             signed = await asyncio.to_thread(client.create_order, args)
@@ -184,7 +165,6 @@ async def handle_query(update, context):
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-    if app.job_queue: app.job_queue.run_repeating(check_win_status, interval=60, first=10)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
