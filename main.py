@@ -34,7 +34,7 @@ LOGO = """
 
 # --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
+    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc.ankr.com/polygon", "https://1rpc.io/matic"]
     for url in endpoints:
         if not url: continue
         try:
@@ -58,13 +58,15 @@ swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 
 # --- 3. MULTI-USER VAULT LOGIC ---
 def get_user_vault(user_id):
-    master = os.getenv("MASTER_KEY", os.getenv("WALLET_SEED", "HYDRA_PROTOCOL_2026"))
+    """Generates a permanent, unique wallet address for each Telegram user."""
+    master = os.getenv("MASTER_KEY", os.getenv("WALLET_SEED", "HYDRA_DEFAULT_SECRET"))
     seed = hashlib.sha256(f"{master}:{user_id}".encode()).hexdigest()
     return Account.from_key(seed)
 
 def init_clob_for_user(vault):
     try:
-        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=0, funder=vault.address)
+        sig_type = int(os.getenv("SIGNATURE_TYPE", 0))
+        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=vault.address)
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except: return None
@@ -117,7 +119,8 @@ async def force_scour():
 async def start(update, context):
     v = get_user_vault(update.effective_user.id)
     btns = [['🚀 START SNIPER', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>Welcome {update.effective_user.first_name}</b>\nVault Active: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    msg = f"{LOGO}\n<b>Welcome {update.effective_user.first_name}</b>\nVault Active: <code>{v.address}</code>"
+    await update.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd, uid = update.message.text, update.effective_user.id
@@ -125,23 +128,23 @@ async def main_handler(update, context):
         m = await update.message.reply_text("📡 <b>SCANNING PROTOCOLS...</b>", parse_mode='HTML')
         if await force_scour():
             kb = [[InlineKeyboardButton(f"🎯 {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("<b>ACTIVE CRYPTO TARGETS:</b>\n<i>(Prices first, Companies bottom)</i>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            await m.edit_text("<b>ACTIVE CRYPTO TARGETS:</b>\n<i>(Price Action > Corporate)</i>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("⚠️ <b>SCAN FAILURE.</b>")
 
     elif 'VAULT' in cmd:
         v = get_user_vault(uid)
         n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
-        msg = (f"<b>🏦 VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n"
+        msg = (f"<b>🏦 VAULT CURRENCY AUDIT</b>\n━━━━━━━━━━━━━━\n"
                f"<b>📍 Address:</b> <code>{v.address}</code>\n\n"
-               f"<b>💎 USDC.e:</b> ${e_bal/1e6:.2f}\n"
+               f"<b>💎 USDC.e (Bridged):</b> ${e_bal/1e6:.2f}\n"
                f"<b>💵 Native USDC:</b> ${n_bal/1e6:.2f}")
         kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"💵 ${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250, 500, 1000]]]
-        kb = [kb[0][:3], kb[0][3:]] # Split rows
+        kb = [kb[0][:3], kb[0][3:]]
         await update.message.reply_text("⚙️ <b>CALIBRATE STRIKE SIZE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
@@ -165,7 +168,7 @@ async def handle_query(update, context):
             params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": v.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
             tx = swap_router.functions.exactInputSingle(params).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
             tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
-            await m.edit_text(f"✅ <b>SENT:</b> <code>{tx_hash.hex()[:20]}...</code>", parse_mode='HTML')
+            await m.edit_text(f"✅ <b>CONVERSION BROADCASTED:</b> <code>{tx_hash.hex()[:20]}...</code>", parse_mode='HTML')
         except Exception as e: await m.edit_text(f"❌ <b>FAILED:</b> {str(e)[:40]}")
 
     elif "INT_" in q.data:
@@ -185,12 +188,19 @@ async def handle_query(update, context):
             await context.bot.send_message(q.message.chat_id, "🚀 <b>STRIKE SUCCESSFUL</b>" if resp.get("success") else f"❌ <b>FAILED:</b> {resp.get('errorMsg')}", parse_mode='HTML')
         except Exception as e: await context.bot.send_message(q.message.chat_id, f"⚠️ <b>SDK ERROR:</b> {str(e)}", parse_mode='HTML')
 
+    elif q.data == "APPROVE_CONTRACT":
+        try:
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
+            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
+            await q.edit_message_text("✅ <b>USDC.e APPROVED!</b>", parse_mode='HTML')
+        except Exception as e: await q.edit_message_text(f"❌ <b>FAILED:</b> {e}", parse_mode='HTML')
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Elite v235 Pulse Active."); app.run_polling()
+    print("Hydra Elite v235 Active."); app.run_polling()
 
 
 
