@@ -1,5 +1,5 @@
 google-genai
-python-telegram-bot
+python-telegram-bot[job-queue]
 numpy
 web3
 eth-account
