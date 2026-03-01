@@ -14,6 +14,7 @@ from py_clob_client.order_builder.constants import BUY
 getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
+STRIKE_LOG = {}
 
 # Visual Branding
 HYDRA_LOGO = """
@@ -88,7 +89,6 @@ async def main_handler(update, context):
     cmd = update.message.text
     if 'SCAN' in cmd:
         loading = await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
-        # Placeholder for real market discovery logic
         kb = [
             [InlineKeyboardButton("🎯 BTC > 100k (Yes/No)", callback_data="INT_0")],
             [InlineKeyboardButton("🎯 ETH ETF Approval", callback_data="INT_1")]
@@ -109,7 +109,7 @@ async def handle_query(update, context):
 
     if "SET_" in q.data:
         val = int(q.data.split("_")[1])
-        context.user_data['payout'] = val
+        context.user_data['stake'] = val
         await q.edit_message_text(f"✅ <b>CAPACITY ARMED: ${val}</b>")
 
     elif "INT_" in q.data:
@@ -120,7 +120,7 @@ async def handle_query(update, context):
             f"🔴 <b>NO:</b> <code>$0.46</code>\n"
             f"📊 <b>MARKET GAP:</b> <code>+2.4%</code>\n"
             f"{BANNER}\n"
-            f"<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('payout', 100):.2f}</code>"
+            f"<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('stake', 10):.2f}</code>"
         )
         kb = [[InlineKeyboardButton("🔥 INITIATE STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
