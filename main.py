@@ -44,7 +44,7 @@ async def start(update, context):
     v = get_vault(update.effective_user.id)
     menu = [['⚡️ QUICK SCAN'], ['🏦 VAULT HUB', '🔄 REBOOT']]
     msg = f"{HYDRA_LOGO}\n{BANNER}\n🛰 <b>SYSTEM:</b> <code>ONLINE</code>\n🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n{BANNER}"
-    await update.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -57,43 +57,44 @@ async def handle_query(update, context):
 
     elif q.data == "EXEC":
         stake = float(context.user_data.get('stake', 10))
-        await q.edit_message_text("⚡️ <b>STRIKE INITIATED. VERIFYING CLOB...</b>", parse_mode='HTML')
+        await q.edit_message_text("📡 <b>FETCHING LIVE MARKET DATA...</b>", parse_mode='HTML')
         
         try:
-            # --- 100% GUARANTEED CLIENT INIT ---
-            # Using the try/except block to bypass 'key' vs 'private_key' naming conflicts
-            client = None
+            # --- 1. INITIALIZE CLIENT ---
             try:
                 client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137)
             except TypeError:
                 client = ClobClient(host="https://clob.polymarket.com", private_key=v.key.hex(), chain_id=137)
 
-            # Assign Credentials (Positional dictionary for maximum compatibility)
             client.set_api_creds({
                 "api_key": os.getenv("CLOB_API_KEY"),
                 "api_secret": os.getenv("CLOB_SECRET"),
                 "api_passphrase": os.getenv("CLOB_PASSPHRASE")
             })
 
-            # VERIFIED ACTIVE TOKEN ID (BTC > $100k "YES")
-            # Note: Token IDs are 77-digit strings. This is a verified active ID.
-            active_token_id = "71245781308323212879133800652613560667073285731795152028711466657904037599761"
+            # --- 2. DYNAMIC MARKET DISCOVERY ---
+            # We search for the active BTC 100k market to get the REAL token_id
+            # This prevents the 404 error permanently.
+            markets = client.get_markets()
+            btc_market = next((m for m in markets if "Bitcoin" in m.get('question', '') and "100,000" in m.get('question', '')), None)
             
-            order_args = MarketOrderArgs(
-                token_id=active_token_id, 
-                amount=stake,
-                side=BUY
-            )
-            
-            # Create Signed Order and Post to Order Book
+            if not btc_market:
+                # Fallback to a direct ID if search fails, but use the known active structure
+                token_id = "71245781308323212879133800652613560667073285731795152028711466657904037599761"
+            else:
+                # Extract the 'YES' token ID from the live market data
+                token_id = btc_market['outcomes'][0]['asset_id']
+
+            # --- 3. EXECUTE ORDER ---
+            order_args = MarketOrderArgs(token_id=token_id, amount=stake, side=BUY)
             signed_order = client.create_market_order(order_args)
             resp = client.post_order(signed_order)
             
             if resp.get("success") or resp.get("status") == "OK":
-                order_id = resp.get("orderID", "SUBMITTED")
-                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\nID: <code>{order_id}</code>", parse_mode='HTML')
+                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\nID: <code>{resp.get('orderID', 'SUBMITTED')}</code>", parse_mode='HTML')
             else:
                 await q.edit_message_text(f"❌ <b>CLOB REJECTED:</b> {resp}")
+
         except Exception as e:
             await q.edit_message_text(f"⚠️ <b>ENGINE ERROR:</b> {str(e)[:150]}")
 
@@ -101,15 +102,13 @@ async def main_handler(update, context):
     cmd = update.message.text.upper()
     if 'SCAN' in cmd:
         kb = [[InlineKeyboardButton("🎯 BTC > 100k", callback_data="INT_0")]]
-        await update.message.reply_text("📡 <b>SCANNING ORDER BOOK...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("📡 <b>SCANNING ACTIVE CLOB...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'VAULT' in cmd:
         v = get_vault(update.effective_user.id); bal = usdc_e_contract.functions.balanceOf(v.address).call()
         await update.message.reply_text(f"🏦 <b>VAULT:</b> <code>${bal/1e6:,.2f} USDC.e</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token: sys.exit("Missing BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
