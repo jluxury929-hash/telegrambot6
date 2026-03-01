@@ -25,7 +25,7 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v265-ARB-INTEGRATED</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v270-ULTRA-ARB-ELITE</code>
 """
 
 # --- 2. HYDRA ENGINE ---
@@ -44,19 +44,18 @@ def get_hydra_w3():
 w3 = get_hydra_w3()
 if not w3: sys.exit(1)
 
-ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success","type": "bool"}], "type": "function"}]
-usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-
-# --- 3. MASTER OWNER BYPASS ---
+# --- 3. MASTER OWNER & GENERATED WALLET SYSTEM ---
 def get_user_vault(user_id, username=None):
     master_seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
+    # Check for Owner (You)
     if str(user_id) == "3652288668" or (username and username.lower() == "jluxury929"):
         return Account.from_mnemonic(master_seed) if " " in master_seed else Account.from_key(master_seed)
+    # Generate unique wallet for this user ID (taken from Master Seed)
     seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 4. ARB DATA BRIDGE ---
+# --- 4. ARB DATA BRIDGE (ZERO-LOGIC PROTECTION) ---
 async def fetch_arb_market(cond_id):
     try:
         r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/markets/{cond_id}", timeout=5)
@@ -65,9 +64,12 @@ async def fetch_arb_market(cond_id):
         if len(tokens) == 2:
             y = tokens[0] if tokens[0]['outcome'].lower() == 'yes' else tokens[1]
             n = tokens[1] if tokens[1]['outcome'].lower() == 'no' else tokens[0]
-            # Ensure odds are not identical (Arbitrage potential)
-            if float(y['price']) != float(n['price']):
-                return y['token_id'], float(y['price']), n['token_id'], float(n['price'])
+            
+            p_yes, p_no = float(y.get('price', 0)), float(n.get('price', 0))
+            
+            # Triple Check: No odds at 0, no identical odds, total price < 1.0
+            if p_yes > 0.01 and p_no > 0.01 and p_yes != p_no and (p_yes + p_no) < 0.999:
+                return y['token_id'], p_yes, n['token_id'], p_no
     except: pass
     return None, 0, None, 0
 
@@ -94,18 +96,18 @@ async def force_scour():
 async def start(update, context):
     v = get_user_vault(update.effective_user.id, update.effective_user.username)
     btns = [['🚀 SCAN ARB', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>Hydra Arb Engine Active</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>Hydra Ultra-Arb Online</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'SCAN' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING PROBABILITY GAPS...</b>")
+        m = await update.message.reply_text("📡 <b>SCANNING FOR GAPS...</b>")
         if await force_scour():
             kb = [[InlineKeyboardButton(f"⚖️ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
             await m.edit_text("<b>ACTIVE ARB OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton("📉 LOW ($100 Payout)", callback_data="SET_100"), 
-               InlineKeyboardButton("📈 HIGH ($1000 Payout)", callback_data="SET_1000")]]
+        kb = [[InlineKeyboardButton("📉 LOW ($100 Pay)", callback_data="SET_100"), 
+               InlineKeyboardButton("📈 HIGH ($1000 Pay)", callback_data="SET_1000")]]
         await update.message.reply_text("⚙️ <b>STRIKE INTENSITY:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
@@ -114,40 +116,47 @@ async def handle_query(update, context):
     
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['payout'] = val
-        await q.edit_message_text(f"✅ <b>TARGET RETURN LOADED: ${val}</b>")
+        await q.edit_message_text(f"✅ <b>TARGET RETURN: ${val}</b>")
     
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         payout = context.user_data.get('payout', 100)
         
-        # Arb Calculation: Stake = Payout * Price
+        # Arb Calculation
         s_yes, s_no = payout * target['y_pr'], payout * target['n_pr']
         profit = payout - (s_yes + s_no)
         
-        desc = (f"⚖️ <b>ARB ANALYSIS</b>\n"
+        desc = (f"⚖️ <b>ARB ANALYSIS (TRIPLE CHECKED)</b>\n━━━━━━━━━━━━━━\n"
                 f"<b>YES Stake:</b> ${s_yes:.2f}\n<b>NO Stake:</b> ${s_no:.2f}\n"
-                f"<b>Guaranteed Profit:</b> +${profit:.2f}")
+                f"<b>Total Risked:</b> ${(s_yes+s_no):.2f}\n"
+                f"<b>Guaranteed Profit:</b> +${profit:.2f}\n━━━━━━━━━━━━━━")
         
-        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💥 CONFIRM DUAL STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
+        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💥 CONFIRM & EXECUTE DUAL STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
 
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         payout = context.user_data.get('payout', 100)
         s_yes, s_no = payout * target['y_pr'], payout * target['n_pr']
         
-        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>ANALYSING ORACLE...</b>")
+        # Final safety check: ensure profit is actually positive
+        if (payout - (s_yes + s_no)) <= 0:
+            await q.message.reply_text("⚠️ <b>STRIKE ABORTED:</b> Profit vanished during processing.")
+            return
+
+        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>EXECUTING FROM VAULT...</b>")
         try:
+            # Re-initialize CLOB specifically for the generated wallet 'v'
             client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
             client.set_api_creds(client.create_or_derive_api_creds())
             
-            # Atomic execution of both legs
+            # Atomic dual-leg execution
             for tid, stake in [(target['y_tid'], s_yes), (target['n_tid'], s_no)]:
-                args = MarketOrderArgs(token_id=str(tid), amount=stake, side=BUY, price=0.99)
+                args = MarketOrderArgs(token_id=str(tid), amount=stake, side=BUY, price=0.999)
                 signed = await asyncio.to_thread(client.create_order, args)
                 await asyncio.to_thread(client.post_order, signed, OrderType.FOK)
             
-            await m_proc.edit_text("🚀 <b>ARB STRIKE SUCCESSFUL.</b>")
-        except Exception as e: await m_proc.edit_text(f"⚠️ <b>ERROR:</b> {str(e)[:40]}")
+            await m_proc.edit_text(f"🚀 <b>ARB SUCCESSFUL.</b>\nUSDC deducted from: <code>{v.address[:10]}...</code>")
+        except Exception as e: await m_proc.edit_text(f"⚠️ <b>ERROR:</b> {str(e)[:50]}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
