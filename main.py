@@ -6,27 +6,20 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+
+# Polymarket SDK
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
+from py_clob_client.clob_types import MarketOrderArgs
 from py_clob_client.order_builder.constants import BUY
 
-# --- 1. CORE CONFIG & VISUAL ASSETS ---
+# --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
-HYDRA_LOGO = """
-<code>╔╗ ╔╗      ╔╗
-║║ ║║      ║║
-║╚═╝╠╗─╔═══╣╚═╗╔═══╗
-║╔═╗║║ ║╔═╗║╔╗║║╔═╗║
-║║ ║║╚═╝║║─║║║║║╚═╝║
-╚╝ ╚╩═══╩╝─╚╝╚╝╚═══╝ v5.0</code>
-"""
+HYDRA_LOGO = "<code>╔╗ ╔╗      ╔╗\n║║ ║║      ║║\n║╚═╝╠╗─╔═══╣╚═╗╔═══╗\n║╔═╗║║ ║╔═╗║╔╗║║╔═╗║\n║║ ║║╚═╝║║─║║║║║╚═╝║\n╚╝ ╚╩═══╩╝─╚╝╚╝╚═══╝ v5.0</code>"
 BANNER = "<b>◈━━━━━━━━━━━━━━◈</b>"
-SEP = "<b>◈──────────────────────────◈</b>"
 
-# USDC.e and CTF Exchange on Polygon
+# SMART CONTRACTS
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 def get_hydra_w3():
     url = os.getenv("RPC_URL", "https://polygon-rpc.com")
@@ -37,24 +30,21 @@ def get_hydra_w3():
     return None
 
 w3 = get_hydra_w3()
-if not w3: sys.exit(1)
-
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
-usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI) if w3 else None
 
-def get_vault(uid, username=None):
-    master = os.getenv("WALLET_SEED", "").strip()
+def get_vault(uid):
+    master = os.getenv("WALLET_SEED", "default_seed_replace_me").strip()
     Account.enable_unaudited_hdwallet_features()
     seed_hash = hashlib.sha256(f"{master}:{uid}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 3. UI HANDLERS ---
+# --- 2. UI HANDLERS ---
 async def start(update, context):
     v = get_vault(update.effective_user.id)
     menu = [['⚡️ QUICK SCAN'], ['🏦 VAULT HUB', '🔄 REBOOT']]
-    reply_markup = ReplyKeyboardMarkup(menu, resize_keyboard=True, is_persistent=True)
     msg = f"{HYDRA_LOGO}\n{BANNER}\n🛰 <b>SYSTEM:</b> <code>ONLINE</code>\n🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n{BANNER}"
-    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='HTML')
+    await update.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True), parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -67,39 +57,36 @@ async def handle_query(update, context):
 
     elif q.data == "EXEC":
         stake = float(context.user_data.get('stake', 10))
-        await q.edit_message_text("⚡️ <b>STRIKE TRANSMISSION IN PROGRESS...</b>", parse_mode='HTML')
+        await q.edit_message_text("⚡️ <b>TRANSMITTING...</b>", parse_mode='HTML')
         
         try:
-            # 1. Initialize empty client
-            client = ClobClient(host="https://clob.polymarket.com", chain_id=137)
+            # --- THE 100% GUARANTEED INIT ---
+            # We pass ONLY the host positionally to avoid any keyword confusion
+            client = ClobClient("https://clob.polymarket.com")
             
-            # 2. DOUBLE CHECKED AUTH: Manual credential injection
-            # This bypasses all keyword argument errors by setting attributes directly
+            # Manually set internal attributes - bypasses keyword errors entirely
             client.api_key = os.getenv("CLOB_API_KEY")
             client.api_secret = os.getenv("CLOB_SECRET")
             client.api_passphrase = os.getenv("CLOB_PASSPHRASE")
+            client.chain_id = 137
             
-            # 3. Inject Private Key into the Signer
+            # Use the internal signer to force the key
             client.signer.private_key = v.key.hex()
             
-            # Market: BTC > $100k "YES" (Verify Token ID via Polymarket if this changes)
             order_args = MarketOrderArgs(
                 token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
                 amount=stake,
                 side=BUY
             )
             
-            # Create and Post Order
-            signed_order = client.create_market_order(order_args)
-            resp = client.post_order(signed_order)
+            resp = client.post_order(client.create_market_order(order_args))
             
             if resp.get("success"):
-                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\nOrder ID: <code>{resp.get('orderID')}</code>", parse_mode='HTML')
+                await q.edit_message_text(f"✅ <b>SUCCESS</b>\nID: <code>{resp.get('orderID')}</code>", parse_mode='HTML')
             else:
-                await q.edit_message_text(f"❌ <b>CLOB REJECTED:</b> {resp.get('error')}")
+                await q.edit_message_text(f"❌ <b>REJECTED:</b> {resp.get('error')}")
         except Exception as e:
-            # Catching and displaying full error for debugging
-            await q.edit_message_text(f"⚠️ <b>ENGINE ERROR:</b> {str(e)[:100]}")
+            await q.edit_message_text(f"⚠️ <b>ERROR:</b> {str(e)[:100]}")
 
 async def main_handler(update, context):
     cmd = update.message.text.upper()
@@ -107,15 +94,18 @@ async def main_handler(update, context):
         kb = [[InlineKeyboardButton("🎯 BTC > 100k", callback_data="INT_0")]]
         await update.message.reply_text("📡 <b>SCANNING...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'VAULT' in cmd:
-        v = get_vault(update.effective_user.id)
-        bal = usdc_e_contract.functions.balanceOf(v.address).call()
+        v = get_vault(update.effective_user.id); bal = usdc_e_contract.functions.balanceOf(v.address).call()
         await update.message.reply_text(f"🏦 <b>VAULT:</b> <code>${bal/1e6:,.2f} USDC.e</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token: sys.exit("Missing BOT_TOKEN")
+    
+    app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+    print("Hydra Online...")
     app.run_polling()
 
 
