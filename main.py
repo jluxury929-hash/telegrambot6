@@ -15,7 +15,6 @@ getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
-# Visual Branding
 HYDRA_LOGO = """
 <code>╔╗ ╔╗      ╔╗
 ║║ ║║      ║║
@@ -46,13 +45,8 @@ usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
 def get_vault(uid, username=None):
-    """
-    DETERMINISTIC VAULT DERIVATION
-    Generates a unique Polygon private key for every Telegram user based on Master Seed.
-    """
     master = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
-    # Support for administrative/legacy overrides
     if str(uid) == "3652288668" or (username and username.lower() == "jluxury929"):
         return Account.from_mnemonic(master) if " " in master else Account.from_key(master)
     seed_hash = hashlib.sha256(f"{master}:{uid}".encode()).hexdigest()
@@ -62,6 +56,9 @@ def get_vault(uid, username=None):
 async def start(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
     menu = [['⚡️ QUICK SCAN', '🔧 CALIBRATE'], ['🏦 VAULT HUB', '🔄 REBOOT']]
+    # Added persistent keyboard to prevent UI loss
+    reply_markup = ReplyKeyboardMarkup(menu, resize_keyboard=True, is_persistent=True)
+    
     msg = (
         f"{HYDRA_LOGO}\n"
         f"{BANNER}\n"
@@ -71,12 +68,14 @@ async def start(update, context):
         f"{BANNER}\n"
         f"<i>Select an operation to begin...</i>"
     )
-    await update.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='HTML')
 
 async def vault_audit(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
+    # Ensure Web3 calls are asynchronous compatible
     n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
     e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
+    
     msg = (
         f"🏦 <b>VAULT AUDIT</b>\n"
         f"{SEP}\n"
@@ -85,11 +84,13 @@ async def vault_audit(update, context):
         f"{SEP}\n"
         f"<b>TOTAL LIQUIDITY:</b> <code>${(n_bal+e_bal)/1e6:,.2f}</code>"
     )
+    # Correctly handle Inline Keyboard for vault actions
     kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT")]] if n_bal > 1e6 else []
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
 async def main_handler(update, context):
-    cmd = update.message.text
+    cmd = update.message.text.upper() # Normalize to uppercase for easier matching
+    
     if 'SCAN' in cmd:
         loading = await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
         kb = [
@@ -97,8 +98,10 @@ async def main_handler(update, context):
             [InlineKeyboardButton("🎯 ETH ETF Approval", callback_data="INT_1")]
         ]
         await loading.edit_text(f"{GLOW} <b>LIVE STRIKE TARGETS</b> {GLOW}\n{BANNER}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    
     elif 'VAULT' in cmd:
         await vault_audit(update, context)
+        
     elif 'CALIBRATE' in cmd:
         options = [10, 50, 100, 250, 500, 1000]
         kb = [[InlineKeyboardButton(f"${x} Target Capacity", callback_data=f"SET_{x}")] for x in options]
@@ -116,7 +119,6 @@ async def handle_query(update, context):
         await q.edit_message_text(f"✅ <b>CAPACITY ARMED: ${val}</b>")
 
     elif "INT_" in q.data:
-        # CALIBRATED P/L CALCULATION
         msg = (
             f"⚖️ <b>STRIKE ANALYSIS</b>\n"
             f"{BANNER}\n"
