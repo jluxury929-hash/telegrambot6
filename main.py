@@ -37,18 +37,27 @@ UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C058
 
 # --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
-    rpc = os.getenv("RPC_URL", "https://polygon-rpc.com")
-    _w3 = Web3(Web3.HTTPProvider(rpc))
-    _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-    return _w3
+    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    for url in endpoints:
+        if not url: continue
+        try:
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            if _w3.is_connected():
+                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                return _w3
+        except: continue
+    return None
 
 w3 = get_hydra_w3()
+if not w3:
+    print("FATAL: RPC Failure."); sys.exit(1)
+
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
 def get_vault(uid, username=None):
-    """Deterministic Vault Derivation: unique wallet per user."""
+    """Deterministic Vault Derivation logic."""
     master = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     if str(uid) == "3652288668" or (username and username.lower() == "jluxury929"):
@@ -56,7 +65,7 @@ def get_vault(uid, username=None):
     seed_hash = hashlib.sha256(f"{master}:{uid}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 3. DATA & UI HANDLERS ---
+# --- 3. UI HANDLERS ---
 async def start(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
     menu = [['⚡️ QUICK SCAN', '🔧 CALIBRATE'], ['🏦 VAULT HUB', '🔄 REBOOT']]
@@ -86,12 +95,13 @@ async def vault_audit(update, context):
         f"{SEP}\n"
         f"<b>TOTAL LIQUIDITY:</b> <code>${(n_bal+e_bal)/1e6:,.2f}</code>"
     )
-    kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
+    kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT")]] if n_bal > 1e6 else []
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text.upper() 
     
+    # Broad keyword matching to fix button unresponsiveness
     if 'SCAN' in cmd:
         loading = await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
         kb = [[InlineKeyboardButton("🎯 BTC > 100k (Yes/No)", callback_data="INT_0")]]
@@ -102,7 +112,7 @@ async def main_handler(update, context):
         
     elif 'CALIBRATE' in cmd:
         options = [10, 50, 100, 250, 500, 1000]
-        kb = [[InlineKeyboardButton(f"${x} Target", callback_data=f"SET_{x}")] for x in options]
+        kb = [[InlineKeyboardButton(f"${x} Target Capacity", callback_data=f"SET_{x}")] for x in options]
         await update.message.reply_text(f"🔧 <b>SET STRIKE CAPACITY:</b>\n{SEP}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     
     elif 'REBOOT' in cmd:
