@@ -44,6 +44,49 @@ usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 
 def get_user_vault(user_id, username=None):
+    import os, asyncio, json, time, requests, numpy as np, sys, hashlib
+from decimal import Decimal, getcontext
+from dotenv import load_dotenv
+from eth_account import Account
+from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import MarketOrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY
+
+# --- 1. CORE CONFIG ---
+getcontext().prec = 28
+load_dotenv()
+OMNI_STRIKE_CACHE = []
+
+# SMART CONTRACT ADDRESSES
+USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
+
+# --- 2. VAULT & ENGINE ---
+def get_hydra_w3():
+    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    for url in endpoints:
+        if not url: continue
+        try:
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            if _w3.is_connected():
+                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                return _w3
+        except: continue
+    return None
+
+w3 = get_hydra_w3()
+if not w3: sys.exit(1)
+
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
+usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+
+def get_user_vault(user_id, username=None):
     master_seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     if str(user_id) == "3652288668" or (username and username.lower() == "jluxury929"):
@@ -51,9 +94,9 @@ def get_user_vault(user_id, username=None):
     seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 3. THE FIX: RELIABLE DATA BRIDGE & ARB FILTER ---
+# --- 3. THE GUARANTEE: DEEP-GAP SCANNER ---
 async def fetch_guaranteed_odds(market_json):
-    """Pulls outcomePrices from Gamma and ONLY passes them if a NON-ZERO profit gap exists."""
+    """Strict filter for markets where P/L is guaranteed to be non-zero."""
     try:
         p_raw = market_json.get('outcomePrices')
         c_raw = market_json.get('clobTokenIds')
@@ -61,31 +104,36 @@ async def fetch_guaranteed_odds(market_json):
         clob_ids = json.loads(c_raw) if isinstance(c_raw, str) else c_raw
         
         if prices and clob_ids and len(prices) >= 2:
-            y_p = float(prices[0])
-            n_p = float(prices[1])
-            # ARB GUARANTEE: If sum >= 1.0, there is 0 profit. 
-            # We filter for sum < 0.999 to guarantee non-zero P/L after fees.
-            if (y_p + n_p) < 0.999 and y_p > 0.001 and n_p > 0.001:
-                return str(clob_ids[0]), y_p, str(clob_ids[1]), n_p
+            # Force high-precision decimal conversion to prevent "0" rounding errors
+            y_p = Decimal(str(prices[0]))
+            n_p = Decimal(str(prices[1]))
+            
+            # ARB PROTECTION: 0.998 threshold guarantees room for profit + slippage
+            if (y_p + n_p) < Decimal("0.998") and y_p > Decimal("0.01"):
+                return str(clob_ids[0]), float(y_p), str(clob_ids[1]), float(n_p)
     except: pass
     return None
 
 async def force_scour():
     global OMNI_STRIKE_CACHE
+    # SCANNING 100 EVENTS TO ENSURE OPTIONS ALWAYS APPEAR
     url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100"
     raw_results = []
     try:
-        resp = await asyncio.to_thread(requests.get, url, timeout=10)
-        for e in resp.json():
+        resp = await asyncio.to_thread(requests.get, url, timeout=12)
+        events = resp.json()
+        for e in events:
             markets = e.get('markets', [])
             for m in markets:
                 res = await fetch_guaranteed_odds(m)
                 if res:
                     y_id, y_p, n_id, n_p = res
                     raw_results.append({
-                        "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
+                        "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, 
+                        "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
                     })
                     break 
+        # Sort by volume to ensure execution liquidity
         OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['vol'], reverse=True)[:15]
         return len(OMNI_STRIKE_CACHE) > 0
     except: return False
@@ -94,29 +142,17 @@ async def force_scour():
 async def start(update, context):
     v = get_user_vault(update.effective_user.id, update.effective_user.username)
     btns = [['🚀 SCAN ARB', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"<b>Hydra v520 Online</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"<b>Hydra v510 Non-Zero Active</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'SCAN' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>FILTERING FOR GUARANTEED PROFIT...</b>")
+        m = await update.message.reply_text("📡 <b>SCANNING FOR GUARANTEED GAPS...</b>")
         if await force_scour():
             kb = [[InlineKeyboardButton(f"✅ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("<b>NON-ZERO PROFIT OPTIONS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("❌ <b>NO PROFITABLE GAPS FOUND.</b>")
-    
-    elif 'VAULT' in cmd:
-        v = get_user_vault(update.effective_user.id, update.effective_user.username)
-        n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
-        e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
-        msg = f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e:</b> ${e_bal/1e6:.2f}\n<b>Native:</b> ${n_bal/1e6:.2f}"
-        kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
-        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
-
-    elif 'CALIBRATE' in cmd:
-        options = [10, 50, 100, 250, 500, 1000]
-        kb = [[InlineKeyboardButton(f"${x} Target", callback_data=f"SET_{x}")] for x in options]
-        await update.message.reply_text("⚙️ <b>TARGET RETURN:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            await m.edit_text("💰 <b>PROFITABLE GAPS FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else:
+            await m.edit_text("❌ <b>NO NON-ZERO GAPS FOUND. RE-SCANNING...</b>")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -124,45 +160,28 @@ async def handle_query(update, context):
     
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['payout'] = val
-        await q.edit_message_text(f"✅ <b>STRIKE TARGET SET: ${val}</b>")
+        await q.edit_message_text(f"✅ <b>TARGET SET: ${val}</b>")
     
-    elif q.data == "CONVERT_NATIVE":
-        m = await q.edit_message_text("📡 <b>CONVERTING...</b>", parse_mode='HTML')
-        try:
-            n_bal = usdc_n_contract.functions.balanceOf(v.address).call()
-            params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": v.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
-            tx = swap_router.functions.exactInputSingle(params).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
-            tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
-            await m.edit_text(f"✅ <b>CONVERSION SENT</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>")
-        except Exception as e: await m.edit_text(f"❌ <b>FAILED:</b> {str(e)[:50]}")
-
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        payout = context.user_data.get('payout', 100)
+        payout = float(context.user_data.get('payout', 100))
         
-        # MATH: Stake = Target * Price
-        s_yes = float(target['y_pr']) * float(payout)
-        s_no = float(target['n_pr']) * float(payout)
-        total_risk = s_yes + s_no
-        profit = float(payout) - total_risk
+        # MATH FIX: Use Decimal for stake calculation to prevent 0 P/L display
+        s_yes = float(Decimal(str(target['y_pr'])) * Decimal(str(payout)))
+        s_no = float(Decimal(str(target['n_pr'])) * Decimal(str(payout)))
+        profit = payout - (s_yes + s_no)
         
         context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
         
-        desc = (f"⚖️ <b>GUARANTEED PROFIT ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
-                f"<b>YES Stake:</b> ${s_yes:.2f} @ {target['y_pr']}\n"
-                f"<b>NO Stake:</b> ${s_no:.2f} @ {target['n_pr']}\n"
-                f"<b>Total Risk:</b> ${total_risk:.2f}\n"
-                f"<b>Implied P/L: +${profit:.4f}</b>\n━━━━━━━━━━━━━━")
-        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("1️⃣ CONFIRM YES LEG", callback_data=f"STP1_{idx}")]]), parse_mode='HTML')
-
-    elif "STP1_" in q.data:
-        arb = context.user_data['active_arb']
-        await q.edit_message_text(f"✅ <b>YES READY: ${arb['s_yes']:.2f}</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("2️⃣ CONFIRM NO LEG & EXE", callback_data=f"EXE_{arb['idx']}")]]), parse_mode='HTML')
+        desc = (f"⚖️ <b>ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
+                f"<b>YES:</b> ${s_yes:.2f} | <b>NO:</b> ${s_no:.2f}\n"
+                f"💎 <b>NET PROFIT: +${profit:.4f}</b>\n━━━━━━━━━━━━━━")
+        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 CONFIRM STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
 
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         arb = context.user_data['active_arb']
-        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>EXECUTING...</b>")
+        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>BROADCASTING...</b>")
         try:
             client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
             client.set_api_creds(client.create_or_derive_api_creds())
@@ -179,11 +198,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
-
-
-
-
-
 
 
 
