@@ -15,7 +15,7 @@ getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
-# SMART CONTRACT ADDRESSES (Integrated from v229)
+# SMART CONTRACT ADDRESSES
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
@@ -135,12 +135,18 @@ async def handle_query(update, update_context):
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         payout = update_context.user_data.get('payout', 100)
+        
+        # LEGIT PROFIT MATH: Target * Price ensures accurate P/L
         s_yes, s_no = target['y_pr'] * payout, target['n_pr'] * payout
-        profit = payout - (s_yes + s_no)
+        total_risk = s_yes + s_no
+        profit = payout - total_risk
+        
         update_context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
-        desc = (f"⚖️ <b>DYNAMIC ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
+        
+        desc = (f"⚖️ <b>LEGIT ARB ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
                 f"<b>YES Stake:</b> ${s_yes:.2f} @ {target['y_pr']}\n"
                 f"<b>NO Stake:</b> ${s_no:.2f} @ {target['n_pr']}\n"
+                f"<b>Total Risk:</b> ${total_risk:.2f}\n"
                 f"<b>Implied P/L:</b> {'+' if profit > 0 else ''}${profit:.2f}\n━━━━━━━━━━━━━━")
         await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("1️⃣ CONFIRM YES LEG", callback_data=f"STP1_{idx}")]]), parse_mode='HTML')
 
