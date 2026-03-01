@@ -59,32 +59,23 @@ async def handle_query(update, context):
         stake = float(context.user_data.get('stake', 10))
         await q.edit_message_text("⚡️ <b>TRANSMITTING...</b>", parse_mode='HTML')
         
+        # --- THE 100% FAIL-SAFE INIT ---
+        client = None
         try:
-            # --- THE 100% FAIL-SAFE INIT ---
-            # 1. Provide the key IN the constructor using 'private_key'
-            # Most modern versions of the library require this to initialize the 'signer'
-            client = ClobClient(
-                host="https://clob.polymarket.com",
-                key=v.key.hex(), # Try 'key' first for older versions
-                chain_id=137
-            )
-            
-            # 2. If the library uses 'private_key' instead of 'key', we catch it here:
+            # Attempt initialization (try keyword 'key' first)
+            client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137)
         except TypeError:
-            client = ClobClient(
-                host="https://clob.polymarket.com",
-                private_key=v.key.hex(), # Try 'private_key' for newer versions
-                chain_id=137
-            )
+            # Fallback to keyword 'private_key'
+            client = ClobClient(host="https://clob.polymarket.com", private_key=v.key.hex(), chain_id=137)
 
         try:
-            # 3. Use the standardized credential setting method
-            # This is safer than direct attribute setting which was failing __dict__ checks
-            client.set_api_creds(
-                os.getenv("CLOB_API_KEY"),
-                os.getenv("CLOB_SECRET"),
-                os.getenv("CLOB_PASSPHRASE")
-            )
+            # 2. FIXED: Pass credentials as a SINGLE DICTIONARY (the 2nd positional argument)
+            creds = {
+                "api_key": os.getenv("CLOB_API_KEY"),
+                "api_secret": os.getenv("CLOB_SECRET"),
+                "api_passphrase": os.getenv("CLOB_PASSPHRASE")
+            }
+            client.set_api_creds(creds)
             
             order_args = MarketOrderArgs(
                 token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
@@ -92,7 +83,7 @@ async def handle_query(update, context):
                 side=BUY
             )
             
-            # 4. Generate and Post Order
+            # 3. Create and Post Order
             resp = client.post_order(client.create_market_order(order_args))
             
             if resp.get("success"):
@@ -114,7 +105,6 @@ async def main_handler(update, context):
 if __name__ == "__main__":
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token: sys.exit("Missing BOT_TOKEN")
-    
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
