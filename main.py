@@ -57,47 +57,48 @@ async def handle_query(update, context):
 
     elif q.data == "EXEC":
         stake = float(context.user_data.get('stake', 10))
-        await q.edit_message_text("⚡️ <b>TRANSMITTING...</b>", parse_mode='HTML')
+        await q.edit_message_text("⚡️ <b>TRANSMITTING TO POLYMARKET...</b>", parse_mode='HTML')
         
-        # --- THE 100% FAIL-SAFE INIT ---
         client = None
         try:
-            # Attempt initialization (try keyword 'key' first)
-            client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137)
-        except TypeError:
-            # Fallback to keyword 'private_key'
-            client = ClobClient(host="https://clob.polymarket.com", private_key=v.key.hex(), chain_id=137)
+            # Multi-Init Fallback to ensure 'signer' exists
+            try:
+                client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137)
+            except TypeError:
+                client = ClobClient(host="https://clob.polymarket.com", private_key=v.key.hex(), chain_id=137)
 
-        try:
-            # 2. FIXED: Pass credentials as a SINGLE DICTIONARY (the 2nd positional argument)
-            creds = {
+            # Dictionary-style credentials for newer SDK versions
+            client.set_api_creds({
                 "api_key": os.getenv("CLOB_API_KEY"),
                 "api_secret": os.getenv("CLOB_SECRET"),
                 "api_passphrase": os.getenv("CLOB_PASSPHRASE")
-            }
-            client.set_api_creds(creds)
+            })
+
+            # THE FIX: Market Token ID for BTC > $100k in 2026 (YES)
+            # This ID is specific to the current active market
+            token_id = "71245781308323212879133800652613560667073285731795152028711466657904037599761"
             
             order_args = MarketOrderArgs(
-                token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
+                token_id=token_id, 
                 amount=stake,
                 side=BUY
             )
             
-            # 3. Create and Post Order
+            # Post Order to the Order Book
             resp = client.post_order(client.create_market_order(order_args))
             
-            if resp.get("success"):
-                await q.edit_message_text(f"✅ <b>SUCCESS</b>\nID: <code>{resp.get('orderID')}</code>", parse_mode='HTML')
+            if resp.get("success") or resp.get("status") == "OK":
+                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\nID: <code>{resp.get('orderID') or 'SUBMITTED'}</code>", parse_mode='HTML')
             else:
-                await q.edit_message_text(f"❌ <b>REJECTED:</b> {resp.get('error')}")
+                await q.edit_message_text(f"❌ <b>REJECTED:</b> {resp.get('error') or resp}")
         except Exception as e:
-            await q.edit_message_text(f"⚠️ <b>ENGINE ERROR:</b> {str(e)[:100]}")
+            await q.edit_message_text(f"⚠️ <b>ENGINE ERROR:</b> {str(e)[:150]}")
 
 async def main_handler(update, context):
     cmd = update.message.text.upper()
     if 'SCAN' in cmd:
         kb = [[InlineKeyboardButton("🎯 BTC > 100k", callback_data="INT_0")]]
-        await update.message.reply_text("📡 <b>SCANNING...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("📡 <b>SCANNING CLOB...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'VAULT' in cmd:
         v = get_vault(update.effective_user.id); bal = usdc_e_contract.functions.balanceOf(v.address).call()
         await update.message.reply_text(f"🏦 <b>VAULT:</b> <code>${bal/1e6:,.2f} USDC.e</code>", parse_mode='HTML')
