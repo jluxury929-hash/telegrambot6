@@ -15,9 +15,8 @@ getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
-USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
+CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗  ██╗
@@ -25,10 +24,10 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v280-BUCKET-ARB</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v285-ARB-STEP-BY-STEP</code>
 """
 
-# --- 2. ENGINE & VAULT ---
+# --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
     endpoints = [os.getenv("RPC_URL"), "https://polygon-bor-rpc.publicnode.com", "https://rpc.ankr.com/polygon"]
     for url in endpoints:
@@ -44,10 +43,7 @@ def get_hydra_w3():
 w3 = get_hydra_w3()
 if not w3: sys.exit(1)
 
-ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success","type": "bool"}], "type": "function"}]
-usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
-usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-
+# --- 3. VAULT SYSTEM ---
 def get_user_vault(user_id, username=None):
     master_seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -56,53 +52,41 @@ def get_user_vault(user_id, username=None):
     seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 3. BUCKET ARBITRAGE MATH ---
-def calculate_bucket_arb(market_list, target_payout):
-    # market_list: list of {"token_id": str, "price": float}
-    total_implied_prob = sum(m['price'] for m in market_list)
-    
-    # We only trade if the sum of all YES outcomes < 1.0 (Profit exists)
-    if total_implied_prob >= 0.999 or total_implied_prob <= 0.05:
-        return None
+# --- 4. CORRECTED ARB DATA BRIDGE ---
+async def fetch_arb_market(cond_id):
+    try:
+        # Use Gamma API to get clean outcome prices for 2-outcome markets
+        url = f"https://gamma-api.polymarket.com/markets?condition_id={cond_id}"
+        r = await asyncio.to_thread(requests.get, url, timeout=5)
+        data = r.json()
+        if not data: return None, 0, None, 0
+        
+        m = data[0]
+        prices = json.loads(m.get('outcomePrices', '["0.5", "0.5"]'))
+        clob_ids = json.loads(m.get('clobTokenIds', '[]'))
+        
+        if len(clob_ids) == 2:
+            y_pr, n_pr = float(prices[0]), float(prices[1])
+            # Only return if prices are valid and non-zero
+            if y_pr > 0.01 and n_pr > 0.01:
+                return clob_ids[0], y_pr, clob_ids[1], n_pr
+    except: pass
+    return None, 0, None, 0
 
-    stakes = []
-    total_cost = 0
-    for m in market_list:
-        # Stake per outcome to guarantee 'target_payout' if that specific YES wins
-        stake = target_payout * m['price']
-        stakes.append({"token_id": m['token_id'], "stake": stake, "price": m['price']})
-        total_cost += stake
-    
-    profit = target_payout - total_cost
-    return {"stakes": stakes, "total_cost": total_cost, "profit": profit, "prob_sum": total_implied_prob}
-
-# --- 4. DATA BRIDGE (MULTI-OUTCOME SCAN) ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
-    # Using the events endpoint which groups all outcomes together
-    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50"
+    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30"
     raw_results = []
     try:
         resp = await asyncio.to_thread(requests.get, url, timeout=5)
         for e in resp.json():
             markets = e.get('markets', [])
-            if len(markets) > 1: # Only multi-choice events for Bucket Arb
-                market_data = []
-                for m in markets:
-                    # Get the 'YES' token price for each option
-                    clob_token = json.loads(m.get('clobTokenIds', '[]'))
-                    if clob_token:
-                        # We assume index 0 is YES or we fetch it
-                        tid = clob_token[0]
-                        price = float(m.get('outcomePrices', ['0'])[0])
-                        if price > 0.005: # Ignore 0 odds
-                            market_data.append({"token_id": tid, "price": price, "name": m.get('groupItemTitle', 'Option')})
-                
-                if market_data:
+            if markets:
+                y_id, y_p, n_id, n_p = await fetch_arb_market(markets[0].get('conditionId'))
+                if y_id and n_id:
                     raw_results.append({
-                        "title": e.get('title')[:30],
-                        "options": market_data,
-                        "vol": float(e.get('volumeNum', 0))
+                        "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, 
+                        "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
                     })
         OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['vol'], reverse=True)[:10]
         return True
@@ -110,27 +94,19 @@ async def force_scour():
 
 # --- 5. UI HANDLERS ---
 async def start(update, context):
-    v = get_user_vault(update.effective_user.id, update.effective_user.username)
-    btns = [['🚀 SCAN BUCKETS', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"{LOGO}\n<b>Hydra Bucket-Arb Online</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [['🚀 SCAN ARB', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
+    await update.message.reply_text(f"{LOGO}\n<b>Hydra Step-Arb Online</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'SCAN' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING BUCKETS FOR GAPS...</b>")
+        m = await update.message.reply_text("📡 <b>FETCHING DATA...</b>")
         if await force_scour():
-            kb = [[InlineKeyboardButton(f"📦 {p['title']}", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("<b>ARB BUCKETS DETECTED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("❌ <b>NO OPPORTUNITIES FOUND.</b>")
+            kb = [[InlineKeyboardButton(f"⚖️ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+            await m.edit_text("<b>ARB OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x} Return", callback_data=f"SET_{x}") for x in [100, 500, 1000]]]
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [100, 500, 1000]]]
         await update.message.reply_text("⚙️ <b>TARGET PAYOUT:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif 'VAULT' in cmd:
-        v = get_user_vault(update.effective_user.id, update.effective_user.username)
-        n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
-        e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
-        msg = f"<b>VAULT</b>\nUSDC.e: ${e_bal/1e6:.2f}\nNative: ${n_bal/1e6:.2f}"
-        await update.message.reply_text(msg, parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -138,42 +114,47 @@ async def handle_query(update, context):
     
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['payout'] = val
-        await q.edit_message_text(f"✅ <b>RETURN TARGET: ${val}</b>")
+        await q.edit_message_text(f"✅ <b>TARGET SET: ${val}</b>")
     
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         payout = context.user_data.get('payout', 100)
-        arb = calculate_bucket_arb(target['options'], payout)
         
-        if not arb:
-            await q.edit_message_text("❌ <b>EFFICIENCY ERROR:</b> Bucket sum is currently > 100%. No profit possible.")
-            return
-            
-        desc = (f"⚖️ <b>BUCKET ARB ANALYSIS</b>\n"
-                f"<b>Options:</b> {len(arb['stakes'])}\n"
-                f"<b>Prob Sum:</b> {arb['prob_sum']*100:.2f}%\n"
-                f"<b>Total Risk:</b> ${arb['total_cost']:.2f}\n"
-                f"<b>Guaranteed Profit:</b> +${arb['profit']:.2f}")
+        # Arb Calculation: Stake = Price * Payout
+        s_yes, s_no = target['y_pr'] * payout, target['n_pr'] * payout
+        profit = payout - (s_yes + s_no)
         
-        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💥 CONFIRM BUCKET STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
+        context.user_data['current_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no}
+        
+        desc = (f"⚖️ <b>ARB ANALYSIS</b>\n"
+                f"<b>YES Stake:</b> ${s_yes:.2f}\n<b>NO Stake:</b> ${s_no:.2f}\n"
+                f"<b>Total Risked:</b> ${(s_yes+s_no):.2f}\n"
+                f"<b>Guaranteed Profit:</b> +${profit:.2f}")
+        
+        kb = [[InlineKeyboardButton("1️⃣ CONFIRM YES STRIKE", callback_data=f"STEP1_{idx}")]]
+        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-    elif "EXE_" in q.data:
+    elif "STEP1_" in q.data:
+        arb = context.user_data['current_arb']
+        kb = [[InlineKeyboardButton("2️⃣ CONFIRM NO STRIKE", callback_data=f"STEP2_{arb['idx']}")]]
+        await q.edit_message_text(f"✅ <b>YES STAKE LOCKED: ${arb['s_yes']:.2f}</b>\nFinalize second leg?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif "STEP2_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        payout = context.user_data.get('payout', 100)
-        arb = calculate_bucket_arb(target['options'], payout)
+        arb = context.user_data['current_arb']
         
-        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>EXECUTING BUCKET SWEEP...</b>")
+        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>ANALYSING ORACLE...</b>")
         try:
             client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
             client.set_api_creds(client.create_or_derive_api_creds())
             
-            # Atomic Sweep of all outcome tokens
-            for item in arb['stakes']:
-                args = MarketOrderArgs(token_id=str(item['token_id']), amount=item['stake'], side=BUY, price=0.999)
+            # Atomic Step-by-Step Execution
+            for tid, stake in [(target['y_tid'], arb['s_yes']), (target['n_tid'], arb['s_no'])]:
+                args = MarketOrderArgs(token_id=str(tid), amount=stake, side=BUY, price=0.999)
                 signed = await asyncio.to_thread(client.create_order, args)
                 await asyncio.to_thread(client.post_order, signed, OrderType.FOK)
             
-            await m_proc.edit_text(f"🚀 <b>BUCKET STRIKE SUCCESSFUL.</b>\nGuaranteed ${arb['profit']:.2f} profit.")
+            await m_proc.edit_text("🚀 <b>STRIKE SUCCESSFUL.</b> Dual-leg arbitrage secured.")
         except Exception as e: await m_proc.edit_text(f"⚠️ <b>ERROR:</b> {str(e)[:50]}")
 
 if __name__ == "__main__":
