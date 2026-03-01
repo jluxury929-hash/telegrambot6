@@ -15,33 +15,52 @@ getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
+# SMART CONTRACT ADDRESSES (Integrated from v229)
+USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
+
 # --- 2. VAULT & ENGINE ---
+def get_hydra_w3():
+    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    for url in endpoints:
+        if not url: continue
+        try:
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            if _w3.is_connected():
+                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                return _w3
+        except: continue
+    return None
+
+w3 = get_hydra_w3()
+if not w3: sys.exit(1)
+
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
+UNISWAP_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
+
+usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
+usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
+
 def get_user_vault(user_id, username=None):
     master_seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
-    # Owner Priority Access
     if str(user_id) == "3652288668" or (username and username.lower() == "jluxury929"):
         return Account.from_mnemonic(master_seed) if " " in master_seed else Account.from_key(master_seed)
-    # Unique Deterministic Sub-Wallet
     seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
 # --- 3. DYNAMIC DATA BRIDGE (GUARANTEED ODDS) ---
 async def fetch_guaranteed_odds(market_json):
-    """Pulls outcomePrices from Gamma to ensure non-zero values."""
     try:
         prices_raw = market_json.get('outcomePrices')
         clob_ids_raw = market_json.get('clobTokenIds')
-        
         if not prices_raw or not clob_ids_raw: return None
-        
-        # Handle stringified JSON from API
         prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
         clob_ids = json.loads(clob_ids_raw) if isinstance(clob_ids_raw, str) else clob_ids_raw
-        
         if len(clob_ids) >= 2:
             y_p, n_p = float(prices[0]), float(prices[1])
-            # Zero-Check: Only skip if market is literally unpriced (0.0)
             if y_p > 0.0001 and n_p > 0.0001:
                 return clob_ids[0], y_p, clob_ids[1], n_p
     except: pass
@@ -49,7 +68,6 @@ async def fetch_guaranteed_odds(market_json):
 
 async def force_scour():
     global OMNI_STRIKE_CACHE
-    # SCAN 100 EVENTS - NO FILTERS (Arb or No-Arb, Short or Long term)
     url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100"
     raw_results = []
     try:
@@ -64,8 +82,7 @@ async def force_scour():
                         "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, 
                         "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
                     })
-                    break # Grab primary 2-outcome pair
-        # Highest volume first for best execution liquidity
+                    break 
         OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['vol'], reverse=True)[:15]
         return True
     except: return False
@@ -83,8 +100,16 @@ async def main_handler(update, update_context):
         if await force_scour():
             kb = [[InlineKeyboardButton(f"⚖️ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
             await m.edit_text("<b>ACTIVE BET OPTIONS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    
+    elif 'VAULT' in cmd:
+        v = get_user_vault(update.effective_user.id, update.effective_user.username)
+        n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
+        e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
+        msg = f"<b>VAULT CURRENCY AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e (Bridged):</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}"
+        kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
+
     elif 'CALIBRATE' in cmd:
-        # 6-Tier Options: $10 to $1000
         options = [10, 50, 100, 250, 500, 1000]
         kb = [[InlineKeyboardButton(f"${x} Target", callback_data=f"SET_{x}")] for x in options]
         await update.message.reply_text("⚙️ <b>TARGET RETURN:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -97,27 +122,31 @@ async def handle_query(update, update_context):
         val = int(q.data.split("_")[1]); update_context.user_data['payout'] = val
         await q.edit_message_text(f"✅ <b>STRIKE TARGET SET: ${val}</b>")
     
+    elif q.data == "CONVERT_NATIVE":
+        m = await q.edit_message_text("📡 <b>PREPARING UNISWAP ROUTE...</b>", parse_mode='HTML')
+        try:
+            n_bal = usdc_n_contract.functions.balanceOf(v.address).call()
+            params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": v.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
+            tx = swap_router.functions.exactInputSingle(params).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
+            tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
+            await m.edit_text(f"✅ <b>CONVERSION SENT</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>")
+        except Exception as e: await m.edit_text(f"❌ <b>FAILED:</b> {str(e)[:50]}")
+
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         payout = update_context.user_data.get('payout', 100)
-        
-        # DYNAMIC STAKING FORMULA: Stake = Target * Price
-        s_yes = target['y_pr'] * payout
-        s_no = target['n_pr'] * payout
+        s_yes, s_no = target['y_pr'] * payout, target['n_pr'] * payout
         profit = payout - (s_yes + s_no)
         update_context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
-        
         desc = (f"⚖️ <b>DYNAMIC ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
                 f"<b>YES Stake:</b> ${s_yes:.2f} @ {target['y_pr']}\n"
                 f"<b>NO Stake:</b> ${s_no:.2f} @ {target['n_pr']}\n"
                 f"<b>Implied P/L:</b> {'+' if profit > 0 else ''}${profit:.2f}\n━━━━━━━━━━━━━━")
-        kb = [[InlineKeyboardButton("1️⃣ CONFIRM YES LEG", callback_data=f"STP1_{idx}")]]
-        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("1️⃣ CONFIRM YES LEG", callback_data=f"STP1_{idx}")]]), parse_mode='HTML')
 
     elif "STP1_" in q.data:
         arb = update_context.user_data['active_arb']
-        kb = [[InlineKeyboardButton("2️⃣ CONFIRM NO LEG & EXECUTE", callback_data=f"EXE_{arb['idx']}")]]
-        await q.edit_message_text(f"✅ <b>YES STRIKE READY: ${arb['s_yes']:.2f}</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await q.edit_message_text(f"✅ <b>YES STRIKE READY: ${arb['s_yes']:.2f}</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("2️⃣ CONFIRM NO LEG & EXECUTE", callback_data=f"EXE_{arb['idx']}")]]), parse_mode='HTML')
 
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
