@@ -148,9 +148,10 @@ async def handle_query(update, context):
             return
         
         try:
+            # FIXED: Corrected parameter from 'key' to 'private_key' and format to hex
             client = ClobClient(
                 "https://clob.polymarket.com", 
-                private_key=v.key.hex(), # Minimal fix: parameter name corrected and hex conversion added
+                private_key=v.key.hex(), 
                 chain_id=137,
                 api_creds={
                     "api_key": os.getenv("CLOB_API_KEY"),
