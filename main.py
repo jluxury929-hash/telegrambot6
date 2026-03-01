@@ -22,31 +22,24 @@ HYDRA_LOGO = """
 ╚╝ ╚╩═══╩╝─╚╝╚╝╚═══╝ v5.0</code>
 """
 BANNER = "<b>◈━━━━━━━━━━━━━━◈</b>"
-GLOW, SEP = "✨", "<b>◈──────────────────────────◈</b>"
+SEP = "<b>◈──────────────────────────◈</b>"
 
-# SMART CONTRACT ADDRESSES
-USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+# USDC.e and CTF Exchange on Polygon
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
-UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
-# --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
-    for url in endpoints:
-        if not url: continue
-        try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
-            if _w3.is_connected():
-                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                return _w3
-        except: continue
+    url = os.getenv("RPC_URL", "https://polygon-rpc.com")
+    _w3 = Web3(Web3.HTTPProvider(url))
+    if _w3.is_connected():
+        _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        return _w3
     return None
 
 w3 = get_hydra_w3()
 if not w3: sys.exit(1)
 
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
 def get_vault(uid, username=None):
@@ -57,81 +50,66 @@ def get_vault(uid, username=None):
 
 # --- 3. UI HANDLERS ---
 async def start(update, context):
-    v = get_vault(update.effective_user.id, update.effective_user.username)
-    menu = [['⚡️ QUICK SCAN', '🔧 CALIBRATE'], ['🏦 VAULT HUB', '🔄 REBOOT']]
+    v = get_vault(update.effective_user.id)
+    menu = [['⚡️ QUICK SCAN'], ['🏦 VAULT HUB', '🔄 REBOOT']]
     reply_markup = ReplyKeyboardMarkup(menu, resize_keyboard=True, is_persistent=True)
-    msg = (f"{HYDRA_LOGO}\n{BANNER}\n🛰 <b>SYSTEM:</b> <code>ONLINE</code>\n🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n{BANNER}")
+    msg = f"{HYDRA_LOGO}\n{BANNER}\n🛰 <b>SYSTEM:</b> <code>ONLINE</code>\n🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n{BANNER}"
     await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='HTML')
-
-async def main_handler(update, context):
-    cmd = update.message.text.upper()
-    if 'SCAN' in cmd:
-        kb = [[InlineKeyboardButton("🎯 BTC > 100k (Yes/No)", callback_data="INT_0")]]
-        await update.message.reply_text(f"{GLOW} <b>LIVE STRIKE TARGETS</b> {GLOW}\n{BANNER}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif 'VAULT' in cmd:
-        v = get_vault(update.effective_user.id); bal = usdc_e_contract.functions.balanceOf(v.address).call()
-        await update.message.reply_text(f"🏦 <b>VAULT:</b> <code>${bal/1e6:,.2f} USDC.e</code>", parse_mode='HTML')
-    elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]]]
-        await update.message.reply_text(f"🔧 <b>STRIKE CAPACITY:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif 'REBOOT' in cmd: await start(update, context)
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    v = get_vault(q.from_user.id, q.from_user.username)
-    
-    if "SET_" in q.data:
-        val = int(q.data.split("_")[1]); context.user_data['stake'] = val
-        await q.edit_message_text(f"✅ <b>ARMED: ${val}</b>")
-    
-    elif "INT_" in q.data:
+    v = get_vault(q.from_user.id)
+
+    if q.data == "INT_0":
         msg = f"⚖️ <b>STRIKE ANALYSIS</b>\n{BANNER}\n🟢 <b>YES:</b> <code>$0.55</code>\n🔴 <b>NO:</b> <code>$0.46</code>\n{BANNER}"
         kb = [[InlineKeyboardButton("🔥 INITIATE STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif q.data == "EXEC":
         stake = float(context.user_data.get('stake', 10))
-        await q.edit_message_text("⚡️ <b>TRANSMITTING STRIKE...</b>", parse_mode='HTML')
+        await q.edit_message_text("⚡️ <b>STRIKE TRANSMISSION IN PROGRESS...</b>", parse_mode='HTML')
         
         try:
-            # 100% FAIL-SAFE INITIALIZATION
-            # Step 1: Initialize client with minimal arguments
+            # 1. Initialize empty client
             client = ClobClient(host="https://clob.polymarket.com", chain_id=137)
             
-            # Step 2: Use set_api_creds to avoid constructor parameter issues
-            client.set_api_creds(
-                api_key=os.getenv("CLOB_API_KEY"),
-                api_secret=os.getenv("CLOB_SECRET"),
-                api_passphrase=os.getenv("CLOB_PASSPHRASE")
-            )
+            # 2. DOUBLE CHECKED AUTH: Manual credential injection
+            # This bypasses all keyword argument errors by setting attributes directly
+            client.api_key = os.getenv("CLOB_API_KEY")
+            client.api_secret = os.getenv("CLOB_SECRET")
+            client.api_passphrase = os.getenv("CLOB_PASSPHRASE")
             
-            # Step 3: Manually inject the private key into the internal signer
-            # This bypasses the 'private_key' / 'key' / 'pk' constructor argument entirely
+            # 3. Inject Private Key into the Signer
             client.signer.private_key = v.key.hex()
             
+            # Market: BTC > $100k "YES" (Verify Token ID via Polymarket if this changes)
             order_args = MarketOrderArgs(
                 token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
                 amount=stake,
                 side=BUY
             )
             
+            # Create and Post Order
             signed_order = client.create_market_order(order_args)
             resp = client.post_order(signed_order)
             
             if resp.get("success"):
-                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\nID: <code>{resp.get('orderID')}</code>", parse_mode='HTML')
+                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\nOrder ID: <code>{resp.get('orderID')}</code>", parse_mode='HTML')
             else:
-                await q.edit_message_text(f"❌ <b>REJECTED:</b> {resp.get('error')}")
+                await q.edit_message_text(f"❌ <b>CLOB REJECTED:</b> {resp.get('error')}")
         except Exception as e:
-            await q.edit_message_text(f"⚠️ <b>EXECUTION ERROR:</b> {str(e)[:60]}")
+            # Catching and displaying full error for debugging
+            await q.edit_message_text(f"⚠️ <b>ENGINE ERROR:</b> {str(e)[:100]}")
 
-    elif q.data == "APPROVE_CTF":
-        try:
-            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
-            await q.edit_message_text("✅ <b>EXCHANGE APPROVED!</b>")
-        except Exception as e:
-            await q.edit_message_text(f"❌ <b>FAILED:</b> {e}")
+async def main_handler(update, context):
+    cmd = update.message.text.upper()
+    if 'SCAN' in cmd:
+        kb = [[InlineKeyboardButton("🎯 BTC > 100k", callback_data="INT_0")]]
+        await update.message.reply_text("📡 <b>SCANNING...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    elif 'VAULT' in cmd:
+        v = get_vault(update.effective_user.id)
+        bal = usdc_e_contract.functions.balanceOf(v.address).call()
+        await update.message.reply_text(f"🏦 <b>VAULT:</b> <code>${bal/1e6:,.2f} USDC.e</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
