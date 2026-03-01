@@ -147,11 +147,10 @@ async def handle_query(update, context):
             await context.bot.send_message(q.message.chat_id, "🔐 <b>EXCHANGE PERMISSION REQUIRED</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             return
         
-        # REAL CLOB EXECUTION
         try:
             client = ClobClient(
                 "https://clob.polymarket.com", 
-                private_key=v.key.hex(), # FIX: parameter name and hex conversion
+                private_key=v.key.hex(), # Minimal fix: Correct parameter name and hex format
                 chain_id=137,
                 api_creds={
                     "api_key": os.getenv("CLOB_API_KEY"),
@@ -159,7 +158,6 @@ async def handle_query(update, context):
                     "api_passphrase": os.getenv("CLOB_PASSPHRASE")
                 }
             )
-            # Example Token ID for BTC > 100k "YES"
             order_args = MarketOrderArgs(
                 token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
                 amount=stake,
