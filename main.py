@@ -47,11 +47,7 @@ w3 = get_hydra_w3()
 if not w3: sys.exit(1)
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
-UNISWAP_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
-
-usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 
 def get_vault(uid, username=None):
     master = os.getenv("WALLET_SEED", "").strip()
@@ -98,24 +94,27 @@ async def handle_query(update, context):
         await q.edit_message_text("⚡️ <b>TRANSMITTING STRIKE...</b>", parse_mode='HTML')
         
         try:
-            # 1. Initialize with HOST and PRIVATE_KEY only
-            client = ClobClient(
-                host="https://clob.polymarket.com", 
-                private_key=v.key.hex(),
-                chain_id=137
-            )
-            # 2. Assign credentials using dedicated method to avoid __init__ errors
+            # 100% FAIL-SAFE INITIALIZATION
+            # Step 1: Initialize client with minimal arguments
+            client = ClobClient(host="https://clob.polymarket.com", chain_id=137)
+            
+            # Step 2: Use set_api_creds to avoid constructor parameter issues
             client.set_api_creds(
                 api_key=os.getenv("CLOB_API_KEY"),
                 api_secret=os.getenv("CLOB_SECRET"),
                 api_passphrase=os.getenv("CLOB_PASSPHRASE")
             )
             
+            # Step 3: Manually inject the private key into the internal signer
+            # This bypasses the 'private_key' / 'key' / 'pk' constructor argument entirely
+            client.signer.private_key = v.key.hex()
+            
             order_args = MarketOrderArgs(
                 token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
                 amount=stake,
                 side=BUY
             )
+            
             signed_order = client.create_market_order(order_args)
             resp = client.post_order(signed_order)
             
@@ -140,7 +139,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
-
 
 
 
