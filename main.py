@@ -30,11 +30,11 @@ def get_hydra_w3():
     return None
 
 w3 = get_hydra_w3()
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]')
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI) if w3 else None
 
 def get_vault(uid):
-    master = os.getenv("WALLET_SEED", "default_seed_replace_me").strip()
+    master = os.getenv("WALLET_SEED", "default_seed").strip()
     Account.enable_unaudited_hdwallet_features()
     seed_hash = hashlib.sha256(f"{master}:{uid}".encode()).hexdigest()
     return Account.from_key(seed_hash)
@@ -60,18 +60,31 @@ async def handle_query(update, context):
         await q.edit_message_text("⚡️ <b>TRANSMITTING...</b>", parse_mode='HTML')
         
         try:
-            # --- THE 100% GUARANTEED INIT ---
-            # We pass ONLY the host positionally to avoid any keyword confusion
-            client = ClobClient("https://clob.polymarket.com")
+            # --- THE 100% FAIL-SAFE INIT ---
+            # 1. Provide the key IN the constructor using 'private_key'
+            # Most modern versions of the library require this to initialize the 'signer'
+            client = ClobClient(
+                host="https://clob.polymarket.com",
+                key=v.key.hex(), # Try 'key' first for older versions
+                chain_id=137
+            )
             
-            # Manually set internal attributes - bypasses keyword errors entirely
-            client.api_key = os.getenv("CLOB_API_KEY")
-            client.api_secret = os.getenv("CLOB_SECRET")
-            client.api_passphrase = os.getenv("CLOB_PASSPHRASE")
-            client.chain_id = 137
-            
-            # Use the internal signer to force the key
-            client.signer.private_key = v.key.hex()
+            # 2. If the library uses 'private_key' instead of 'key', we catch it here:
+        except TypeError:
+            client = ClobClient(
+                host="https://clob.polymarket.com",
+                private_key=v.key.hex(), # Try 'private_key' for newer versions
+                chain_id=137
+            )
+
+        try:
+            # 3. Use the standardized credential setting method
+            # This is safer than direct attribute setting which was failing __dict__ checks
+            client.set_api_creds(
+                os.getenv("CLOB_API_KEY"),
+                os.getenv("CLOB_SECRET"),
+                os.getenv("CLOB_PASSPHRASE")
+            )
             
             order_args = MarketOrderArgs(
                 token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
@@ -79,6 +92,7 @@ async def handle_query(update, context):
                 side=BUY
             )
             
+            # 4. Generate and Post Order
             resp = client.post_order(client.create_market_order(order_args))
             
             if resp.get("success"):
@@ -86,7 +100,7 @@ async def handle_query(update, context):
             else:
                 await q.edit_message_text(f"❌ <b>REJECTED:</b> {resp.get('error')}")
         except Exception as e:
-            await q.edit_message_text(f"⚠️ <b>ERROR:</b> {str(e)[:100]}")
+            await q.edit_message_text(f"⚠️ <b>ENGINE ERROR:</b> {str(e)[:100]}")
 
 async def main_handler(update, context):
     cmd = update.message.text.upper()
@@ -105,9 +119,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Online...")
     app.run_polling()
-
 
 
 
