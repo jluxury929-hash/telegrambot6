@@ -30,7 +30,6 @@ SEP = "<b>◈──────────────────────�
 # SMART CONTRACT ADDRESSES
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
 # --- 2. ENGINE & VAULT ---
 def get_hydra_w3():
@@ -56,7 +55,7 @@ def get_vault(uid, username=None):
 async def start(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
     menu = [['⚡️ QUICK SCAN', '🔧 CALIBRATE'], ['🏦 VAULT HUB', '🔄 REBOOT']]
-    # Added persistent keyboard to prevent UI loss
+    # Set keyboard to be persistent and resize
     reply_markup = ReplyKeyboardMarkup(menu, resize_keyboard=True, is_persistent=True)
     
     msg = (
@@ -72,7 +71,7 @@ async def start(update, context):
 
 async def vault_audit(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
-    # Ensure Web3 calls are asynchronous compatible
+    # Using asyncio.to_thread to prevent blocking the event loop
     n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
     e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
     
@@ -84,29 +83,31 @@ async def vault_audit(update, context):
         f"{SEP}\n"
         f"<b>TOTAL LIQUIDITY:</b> <code>${(n_bal+e_bal)/1e6:,.2f}</code>"
     )
-    # Correctly handle Inline Keyboard for vault actions
+    # Ensure conversion buttons only show if balance is sufficient
     kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT")]] if n_bal > 1e6 else []
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
 async def main_handler(update, context):
-    cmd = update.message.text.upper() # Normalize to uppercase for easier matching
+    # Capture the message text and clean it for matching
+    text = update.message.text.upper()
     
-    if 'SCAN' in cmd:
-        loading = await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
-        kb = [
-            [InlineKeyboardButton("🎯 BTC > 100k (Yes/No)", callback_data="INT_0")],
-            [InlineKeyboardButton("🎯 ETH ETF Approval", callback_data="INT_1")]
-        ]
-        await loading.edit_text(f"{GLOW} <b>LIVE STRIKE TARGETS</b> {GLOW}\n{BANNER}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    # BROAD MATCHING: Triggers if the keyword is anywhere in the button text
+    if 'SCAN' in text:
+        await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
     
-    elif 'VAULT' in cmd:
+    elif 'VAULT' in text:
+        # This triggers the VAULT HUB audit
         await vault_audit(update, context)
         
-    elif 'CALIBRATE' in cmd:
+    elif 'CALIBRATE' in text:
         options = [10, 50, 100, 250, 500, 1000]
         kb = [[InlineKeyboardButton(f"${x} Target Capacity", callback_data=f"SET_{x}")] for x in options]
         await update.message.reply_text(f"🔧 <b>SET STRIKE CAPACITY:</b>\n{SEP}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    
+    elif 'REBOOT' in text:
+        await start(update, context)
 
+# (handle_query logic remains same as provided)
 async def handle_query(update, context):
     q = update.callback_query
     await q.answer()
