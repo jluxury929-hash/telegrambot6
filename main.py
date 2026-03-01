@@ -51,15 +51,15 @@ async def handle_query(update, context):
     v = get_vault(q.from_user.id)
 
     if q.data == "INT_0":
-        msg = f"⚖️ <b>STRIKE ANALYSIS</b>\n{BANNER}\n🟢 <b>YES:</b> <code>$0.55</code>\n🔴 <b>NO:</b> <code>$0.46</code>\n{BANNER}"
-        kb = [[InlineKeyboardButton("🔥 INITIATE STRIKE", callback_data="EXEC")]]
+        msg = f"⚖️ <b>STRIKE ANALYSIS</b>\n{BANNER}\n🟢 <b>YES:</b> <code>LIVE</code>\n🔴 <b>NO:</b> <code>LIVE</code>\n{BANNER}"
+        kb = [[InlineKeyboardButton("🔥 INITIATE ATOMIC STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif q.data == "EXEC":
         stake = float(context.user_data.get('stake', 10))
-        await q.edit_message_text("⚡️ <b>STRIKE INITIATED...</b>", parse_mode='HTML')
+        await q.edit_message_text("⚡️ <b>DISCOVERING ACTIVE TOKEN ID...</b>", parse_mode='HTML')
         try:
-            # Multi-Init Fallback
+            # Multi-Init Fallback to bypass keyword argument errors
             client = None
             try:
                 client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137)
@@ -72,8 +72,21 @@ async def handle_query(update, context):
                 "api_passphrase": os.getenv("CLOB_PASSPHRASE")
             })
 
-            # Verified Asset ID for YES on BTC 100k
-            token_id = "71245781308323212879133800652613560667073285731795152028711466657904037599761"
+            # --- AUTO-DISCOVERY LOGIC ---
+            # Instead of hardcoding the ID, we search for the active BTC market
+            markets = client.get_markets()
+            # Search for the Bitcoin 100k market in the active list
+            target = next((m for m in markets if "Bitcoin" in m.get('question', '') and "100,000" in m.get('question', '')), None)
+            
+            if not target:
+                # Emergency fallback to current ID if search fails
+                token_id = "71245781308323212879133800652613560667073285731795152028711466657904037599761"
+            else:
+                # Grab the actual YES token asset ID from the live data
+                token_id = target['outcomes'][0]['asset_id']
+
+            await q.edit_message_text(f"🛰 <b>TOKEN FOUND:</b> <code>{token_id[:10]}...</code>\n⚡️ <b>TRANSMITTING...</b>", parse_mode='HTML')
+
             order_args = MarketOrderArgs(token_id=token_id, amount=stake, side=BUY)
             resp = client.post_order(client.create_market_order(order_args))
             
@@ -87,27 +100,19 @@ async def handle_query(update, context):
 async def main_handler(update, context):
     if 'SCAN' in update.message.text.upper():
         kb = [[InlineKeyboardButton("🎯 BTC > 100k", callback_data="INT_0")]]
-        await update.message.reply_text("📡 <b>SCANNING...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("📡 <b>SCANNING CLOB...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-# --- 3. MAIN ENTRY POINT (NON-ASYNC WRAPPER) ---
+# --- 3. MAIN ENTRY POINT ---
 if __name__ == "__main__":
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        print("CRITICAL: Missing TELEGRAM_BOT_TOKEN")
-        sys.exit(1)
+    if not token: sys.exit(1)
     
-    # Initialize the Application
     app = ApplicationBuilder().token(token).build()
-    
-    # Add Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     
     print("Hydra Online... System Loop Initialized.")
-    
-    # run_polling() is a BLOCKING call. It manages the event loop for you.
-    # It also automatically handles dropping pending updates to avoid conflicts.
     app.run_polling(drop_pending_updates=True)
 
 
