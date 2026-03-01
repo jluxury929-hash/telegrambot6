@@ -1,90 +1,95 @@
-import os, asyncio, json, time, hashlib
+import os, asyncio, json, time, hashlib, requests
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
 from eth_account import Account
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from web3.middleware import ExtraDataToPOAMiddleware
 
-# --- 1. AZURO PROTOCOL CONFIG (POLYGON 2026) ---
-POLYGON_RPC = "https://polygon-rpc.com"
-USDT_POLYGON = Web3.to_checksum_address("0xc2132D05D31c914a87C6611C10748AEb04B58e8F")
-AZURO_LP = Web3.to_checksum_address("0x7043a09d3711D883234907a7E09117600863953C") # Example LP
-PREMATCH_CORE = Web3.to_checksum_address("0x123456789...replace_with_current_core")
+# --- 1. CORE CONFIG & AZURO CONTRACTS ---
+USDT_ADDR = Web3.to_checksum_address("0xc2132D05D31c914a87C6611C10748AEb04B58e8F")
+AZURO_LP = Web3.to_checksum_address("0x7043a09d3711D883234907a7E09117600863953C")
+PREMATCH_CORE = Web3.to_checksum_address("0x1ada577f8A27d533A2B5E3C7586221415D9e2553")
 
-# Simplified ABI for Azuro LP Bet function
-AZURO_LP_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"core","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"components":[{"internalType":"uint256","name":"affiliate","type":"address"},{"internalType":"uint64","name":"minOdds","type":"uint64"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"betData","type":"tuple"}],"name":"bet","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+AZURO_LP_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"core","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"components":[{"internalType":"address","name":"affiliate","type":"address"},{"internalType":"uint64","name":"minOdds","type":"uint64"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"betData","type":"tuple"}],"name":"bet","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 
-w3 = Web3(Web3.HTTPProvider(POLYGON_RPC))
+w3 = Web3(Web3.HTTPProvider(os.getenv("RPC_URL", "https://polygon-rpc.com")))
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-# --- 2. DETERMINISTIC VAULT ---
-def get_user_vault(user_id):
-    master_seed = os.getenv("WALLET_SEED", "your_secret_seed")
-    seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
+# --- 2. DETERMINISTIC VAULT (Safe per-user wallets) ---
+def get_vault(user_id):
+    seed = os.getenv("WALLET_SEED", "default_master_seed")
+    # Generate unique entropy for this specific user
+    entropy = hashlib.sha256(f"{seed}:{user_id}".encode()).hexdigest()
     Account.enable_unaudited_hdwallet_features()
-    return Account.from_key("0x" + seed_hash)
+    return Account.from_key("0x" + entropy)
 
-# --- 3. ON-CHAIN EXECUTION ---
-async def execute_azuro_bet(user_id, condition_id, outcome_id, amount_usdt, odds):
-    """
-    Directly interacts with the Azuro Smart Contract on Polygon.
-    """
-    vault = get_user_vault(user_id)
-    lp_contract = w3.eth.contract(address=AZURO_LP, abi=AZURO_LP_ABI)
+# --- 3. ON-CHAIN STRIKE ENGINE ---
+async def place_azuro_bet(user_id, cond_id, out_id, amount, odds):
+    v = get_vault(user_id)
+    lp = w3.eth.contract(address=AZURO_LP, abi=AZURO_LP_ABI)
     
-    # Encode the specific bet data (ConditionID + OutcomeID)
-    # Azuro uses specific byte encoding for its 'data' field
-    encoded_data = w3.eth.abi.encode(['uint256', 'uint64'], [condition_id, outcome_id])
+    # Format: ConditionID and OutcomeID into bytes for Azuro
+    bet_bytes = w3.eth.abi.encode(['uint256', 'uint64'], [int(cond_id), int(out_id)])
     
-    # 12-decimal precision for Azuro odds (e.g., 2.0 = 2 * 10^12)
-    min_odds_raw = int(odds * 10**12) 
-    amount_raw = int(amount_usdt * 10**6) # USDT has 6 decimals
-    
-    nonce = w3.eth.get_transaction_count(vault.address)
-    deadline = int(time.time() + 600) # 10 minute deadline
-
-    # Build Transaction
-    tx = lp_contract.functions.bet(
+    tx = lp.functions.bet(
         PREMATCH_CORE,
-        amount_raw,
-        deadline,
-        (Web3.to_checksum_address("0x0000000000000000000000000000000000000000"), # No affiliate
-         min_odds_raw,
-         encoded_data)
+        int(amount * 10**6), # USDT decimals
+        int(time.time() + 600),
+        (Web3.to_checksum_address("0x0000000000000000000000000000000000000000"),
+         int(odds * 10**12), # Azuro odds precision
+         bet_bytes)
     ).build_transaction({
-        'from': vault.address,
-        'nonce': nonce,
-        'gas': 400000,
+        'from': v.address,
+        'nonce': w3.eth.get_transaction_count(v.address),
+        'gas': 450000,
         'gasPrice': w3.eth.gas_price
     })
-
-    signed_tx = w3.eth.account.sign_transaction(tx, vault.key)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-    return w3.to_hex(tx_hash)
-
-# --- 4. BOT HANDLERS ---
-async def start(update, context):
-    v = get_user_vault(update.effective_user.id)
-    msg = f"🛰️ **AZURO-HYDRA ONLINE**\nVault: `{v.address}`\nNetwork: Polygon POS"
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def bet_handler(update, context):
-    # Usage: /strike [cond_id] [outcome_id] [amount] [odds]
-    uid = update.effective_user.id
-    c_id, o_id, amt, odds = map(float, context.args)
     
-    m = await update.message.reply_text("⛓️ **BROADCASTING TO POLYGON...**")
+    signed = w3.eth.account.sign_transaction(tx, v.key)
+    return w3.to_hex(w3.eth.send_raw_transaction(signed.rawTransaction))
+
+# --- 4. TELEGRAM INTERFACE ---
+async def start(update, context):
+    v = get_vault(update.effective_user.id)
+    menu = [['🚀 SCAN GAPS', '🏦 VAULT'], ['⚙️ SETUP WALLET']]
+    await update.message.reply_text(
+        f"<b>🔱 HYDRA ELITE v260</b>\nVault: <code>{v.address}</code>",
+        reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True), parse_mode='HTML'
+    )
+
+async def check_arb(update, context):
+    # Syntax: /check [AzuroOdds] [OffshoreOdds]
     try:
-        tx_h = await execute_azuro_bet(uid, int(c_id), int(o_id), amt, odds)
-        await m.edit_text(f"✅ **STRIKE SUCCESSFUL**\nTx: [PolygonScan](https://polygonscan.com/tx/{tx_h})", parse_mode='Markdown')
-    except Exception as e:
-        await m.edit_text(f"❌ **FAILED:** {str(e)[:50]}")
+        azuro, offshore = map(float, context.args)
+        # Probabilities: 1/odds
+        total_prob = (1/azuro) + (1/offshore)
+        
+        if total_prob < 0.98: # 2% profit margin trigger
+            profit = (1 - total_prob) * 100
+            msg = (f"🎯 <b>STRIKE ALERT: {profit:.2f}% GAP</b>\n"
+                   f"Azuro (Fair): {azuro} | Offshore (Unfair): {offshore}\n"
+                   f"Total Implied: {total_prob:.3f}")
+            kb = [[InlineKeyboardButton("🔥 EXECUTE ON-CHAIN LEG", callback_data="EXEC_BET")]]
+            await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else:
+            await update.message.reply_text(f"❌ No Gap. Market Efficiency: {total_prob:.3f}")
+    except:
+        await update.message.reply_text("Usage: /check [AzuroOdds] [OffshoreOdds]")
+
+async def handle_callback(update, context):
+    q = update.callback_query; await q.answer()
+    if q.data == "EXEC_BET":
+        # Example dynamic params (in production, these come from context)
+        tx = await place_azuro_bet(q.from_user.id, 12345, 1, 10.0, 1.95)
+        await q.edit_message_text(f"✅ <b>TRANSACTION SENT</b>\nHash: <code>{tx[:20]}...</code>", parse_mode='HTML')
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token("YOUR_TELEGRAM_TOKEN").build()
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("strike", bet_handler))
-    app.run_polling()
+    app.add_handler(CommandHandler("check", check_arb))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    print("Hydra v260 is searching..."); app.run_polling()
 
 
 
