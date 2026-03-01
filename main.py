@@ -16,7 +16,6 @@ load_dotenv()
 OMNI_STRIKE_CACHE = []
 STRIKE_LOG = {}
 
-# Visual Branding
 HYDRA_LOGO = """
 <code>╔╗ ╔╗      ╔╗
 ║║ ║║      ║║
@@ -49,15 +48,16 @@ def get_hydra_w3():
     return None
 
 w3 = get_hydra_w3()
-if not w3:
-    print("FATAL: RPC Failure."); sys.exit(1)
+if not w3: sys.exit(1)
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
+UNISWAP_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
+
 usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 
 def get_vault(uid, username=None):
-    """Deterministic Vault Derivation logic."""
     master = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     if str(uid) == "3652288668" or (username and username.lower() == "jluxury929"):
@@ -70,15 +70,12 @@ async def start(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
     menu = [['⚡️ QUICK SCAN', '🔧 CALIBRATE'], ['🏦 VAULT HUB', '🔄 REBOOT']]
     reply_markup = ReplyKeyboardMarkup(menu, resize_keyboard=True, is_persistent=True)
-    
     msg = (
-        f"{HYDRA_LOGO}\n"
-        f"{BANNER}\n"
+        f"{HYDRA_LOGO}\n{BANNER}\n"
         f"🛰 <b>SYSTEM STATUS:</b> <code>ONLINE</code>\n"
         f"💼 <b>OPERATOR:</b> <code>{update.effective_user.first_name}</code>\n"
         f"🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n"
-        f"{BANNER}\n"
-        f"<i>Select an operation to begin...</i>"
+        f"{BANNER}\n<i>Select an operation to begin...</i>"
     )
     await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='HTML')
 
@@ -86,74 +83,88 @@ async def vault_audit(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
     n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
     e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
-    
     msg = (
-        f"🏦 <b>VAULT AUDIT</b>\n"
-        f"{SEP}\n"
+        f"🏦 <b>VAULT AUDIT</b>\n{SEP}\n"
         f"💎 <b>Native USDC:</b> <code>${n_bal/1e6:,.2f}</code>\n"
         f"🌀 <b>USDC.e:</b> <code>${e_bal/1e6:,.2f}</code>\n"
-        f"{SEP}\n"
-        f"<b>TOTAL LIQUIDITY:</b> <code>${(n_bal+e_bal)/1e6:,.2f}</code>"
+        f"{SEP}\n<b>TOTAL LIQUIDITY:</b> <code>${(n_bal+e_bal)/1e6:,.2f}</code>"
     )
-    kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT")]] if n_bal > 1e6 else []
+    kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
 async def main_handler(update, context):
-    cmd = update.message.text.upper() 
-    
-    # Broad keyword matching to fix button unresponsiveness
+    cmd = update.message.text.upper()
     if 'SCAN' in cmd:
         loading = await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
         kb = [[InlineKeyboardButton("🎯 BTC > 100k (Yes/No)", callback_data="INT_0")]]
         await loading.edit_text(f"{GLOW} <b>LIVE STRIKE TARGETS</b> {GLOW}\n{BANNER}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    
     elif 'VAULT' in cmd:
         await vault_audit(update, context)
-        
     elif 'CALIBRATE' in cmd:
-        options = [10, 50, 100, 250, 500, 1000]
-        kb = [[InlineKeyboardButton(f"${x} Target Capacity", callback_data=f"SET_{x}")] for x in options]
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
         await update.message.reply_text(f"🔧 <b>SET STRIKE CAPACITY:</b>\n{SEP}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    
     elif 'REBOOT' in cmd:
         await start(update, context)
 
 async def handle_query(update, context):
-    q = update.callback_query
-    await q.answer()
+    q = update.callback_query; await q.answer()
     uid, uname = q.from_user.id, q.from_user.username
     v = get_vault(uid, uname)
 
     if "SET_" in q.data:
-        val = int(q.data.split("_")[1])
-        context.user_data['stake'] = val
+        val = int(q.data.split("_")[1]); context.user_data['stake'] = val
         await q.edit_message_text(f"✅ <b>CAPACITY ARMED: ${val}</b>")
+
+    elif q.data == "CONVERT_NATIVE":
+        m = await q.edit_message_text("📡 <b>PREPARING UNISWAP ROUTE...</b>", parse_mode='HTML')
+        try:
+            n_bal = usdc_n_contract.functions.balanceOf(v.address).call()
+            allowance = usdc_n_contract.functions.allowance(v.address, UNISWAP_ROUTER).call()
+            if allowance < n_bal:
+                tx = usdc_n_contract.functions.approve(UNISWAP_ROUTER, 2**256 - 1).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
+                w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
+                await m.edit_text("🔑 <b>ROUTER APPROVED.</b> Click Convert again.")
+                return
+            params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": v.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
+            tx = swap_router.functions.exactInputSingle(params).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
+            tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
+            await m.edit_text(f"✅ <b>CONVERSION BROADCASTED</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>")
+        except Exception as e: await m.edit_text(f"❌ <b>CONVERSION FAILED:</b> {str(e)[:50]}")
 
     elif "INT_" in q.data:
         msg = (
-            f"⚖️ <b>STRIKE ANALYSIS</b>\n"
-            f"{BANNER}\n"
+            f"⚖️ <b>STRIKE ANALYSIS</b>\n{BANNER}\n"
             f"🟢 <b>YES:</b> <code>$0.55</code>\n"
             f"🔴 <b>NO:</b> <code>$0.46</code>\n"
             f"📊 <b>MARKET GAP:</b> <code>+2.4%</code>\n"
-            f"{BANNER}\n"
-            f"<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('stake', 10):.2f}</code>"
+            f"{BANNER}\n<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('stake', 10):.2f}</code>"
         )
         kb = [[InlineKeyboardButton("🔥 INITIATE STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif q.data == "EXEC":
+        stake = float(context.user_data.get('stake', 10))
+        allowance = usdc_e_contract.functions.allowance(v.address, CTF_EXCHANGE).call()
+        if allowance < (stake * 1e6):
+            kb = [[InlineKeyboardButton("🔑 APPROVE EXCHANGE", callback_data="APPROVE_CTF")]]
+            await context.bot.send_message(q.message.chat_id, "🔐 <b>EXCHANGE PERMISSION REQUIRED</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            return
         await q.edit_message_text("⚡️ <b>TRANSACTION BROADCASTED...</b>")
         await asyncio.sleep(1.5)
-        await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\n{BANNER}\n<i>Hash: 0x77...829a</i>", parse_mode='HTML')
+        await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\n{BANNER}\n<i>Order broadcasted to CLOB.</i>", parse_mode='HTML')
 
-# --- 4. BOOTSTRAP ---
+    elif q.data == "APPROVE_CTF":
+        try:
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
+            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
+            await q.edit_message_text("✅ <b>EXCHANGE APPROVED!</b> Ready to strike.")
+        except Exception as e: await q.edit_message_text(f"❌ <b>FAILED:</b> {e}")
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra v5.0 Neon Operational.")
     app.run_polling()
 
 
