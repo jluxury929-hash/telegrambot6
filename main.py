@@ -151,7 +151,7 @@ async def handle_query(update, context):
         try:
             client = ClobClient(
                 "https://clob.polymarket.com", 
-                key=v.key, 
+                private_key=v.key.hex(), # FIX: parameter name and hex conversion
                 chain_id=137,
                 api_creds={
                     "api_key": os.getenv("CLOB_API_KEY"),
@@ -189,8 +189,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
-
-
 
 
 
