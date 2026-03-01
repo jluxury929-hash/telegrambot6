@@ -148,7 +148,7 @@ async def handle_query(update, context):
             return
         
         try:
-            # FIX: Use 'host' and 'private_key' as keyword arguments
+            # FIX: Corrected initialization to use 'host' and 'private_key' as strings
             client = ClobClient(
                 host="https://clob.polymarket.com", 
                 private_key=v.key.hex(),
