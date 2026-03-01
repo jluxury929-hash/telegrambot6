@@ -6,7 +6,6 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from google import genai
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
@@ -14,7 +13,6 @@ from py_clob_client.order_builder.constants import BUY
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
-ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 OMNI_STRIKE_CACHE = []
 STRIKE_LOG = {}
 
@@ -30,16 +28,23 @@ LOGO = """
 ███████║██████╔╝█████╗     ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-ELITE-EMOJI</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v250-ULTRA-ELITE</code>
 """
 
-# --- 2. HYDRA ENGINE ---
+# --- 2. REINFORCED HYDRA ENGINE ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    # Priority list of 2026 stable endpoints with reinforced timeout
+    endpoints = [
+        os.getenv("RPC_URL"), 
+        "https://polygon-bor-rpc.publicnode.com",
+        "https://rpc.ankr.com/polygon",
+        "https://1rpc.io/matic",
+        "https://polygon-rpc.com"
+    ]
     for url in endpoints:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 20}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
@@ -61,8 +66,10 @@ swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 def get_vault(user_id, username=None):
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
+    # OWNER CHECK: Bypass for your ID and Username to keep your wallet same
     if str(user_id) == "3652288668" or (username and username.lower() == "jluxury929"):
         return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
+    # OTHERS: Generate deterministic unique wallet
     user_seed = hashlib.sha256(f"{seed}:{user_id}".encode()).hexdigest()
     return Account.from_key(user_seed)
 
@@ -92,16 +99,14 @@ async def check_win_status(context):
             r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/prices/history?token_id={tid}", timeout=5)
             if r.status_code == 200:
                 history = r.json()
-                if history:
-                    current_price = float(history[-1].get('price', 0))
-                    if current_price >= 0.99:
-                        profit = (data['stake'] / data['price']) - data['stake']
-                        msg = (f" <b>STRIKE RESOLVED: WINNER</b>\n"
-                               f"━━━━━━━━━━━━━━\n"
-                               f"<b>Target:</b> {data['q']}\n"
-                               f"<b>Net Profit:</b> +${profit:.2f} USDC\n")
-                        await context.bot.send_message(data['chat_id'], msg, parse_mode='HTML')
-                        del STRIKE_LOG[tid]
+                if history and float(history[-1].get('price', 0)) >= 0.99:
+                    profit = (data['stake'] / data['price']) - data['stake']
+                    msg = (f" 🎯 <b>STRIKE RESOLVED: WINNER</b>\n"
+                           f"━━━━━━━━━━━━━━\n"
+                           f"<b>Target:</b> {data['q']}\n"
+                           f"<b>Net Profit:</b> +${profit:.2f} USDC\n")
+                    await context.bot.send_message(data['chat_id'], msg, parse_mode='HTML')
+                    del STRIKE_LOG[tid]
     except: pass
 
 async def force_scour():
@@ -119,11 +124,17 @@ async def force_scour():
                     m = m_list[0]
                     tid, pr = await fetch_market_data(m.get('conditionId'))
                     if tid:
-                        # MINIMAL CHANGE: Priority scoring
+                        # ULTRA-SHORT PRIORITY SCORING
                         score = 2 if "5-minute" in title else 1 if "15-minute" in title else 0
-                        raw_results.append({"title": e.get('title')[:25], "q": m.get('question'), "token_id": tid, "price": pr, "vol": float(e.get('volumeNum', 0)), "score": score})
+                        raw_results.append({
+                            "title": e.get('title')[:25],
+                            "q": m.get('question'),
+                            "token_id": tid,
+                            "price": pr,
+                            "vol": float(e.get('volumeNum', 0)),
+                            "score": score
+                        })
         if raw_results:
-            # MINIMAL CHANGE: Priority sort
             raw_results.sort(key=lambda x: (x['score'], x['vol']), reverse=True)
             OMNI_STRIKE_CACHE = raw_results[:10]
             return True
@@ -138,10 +149,10 @@ async def start(update, context):
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START SNIPER' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text(" <b>SCANNING CRYPTO MARKETS...</b>", parse_mode='HTML')
+        m = await update.message.reply_text(" <b>SCANNING ECOSYSTEM...</b>", parse_mode='HTML')
         if await force_scour():
             kb = [[InlineKeyboardButton(f"{'⚡' if p['score']>0 else ''} {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("<b> ACTIVE CRYPTO TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            await m.edit_text("<b> ACTIVE TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'VAULT' in cmd:
         v = get_vault(update.effective_user.id, update.effective_user.username)
         n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
@@ -149,7 +160,7 @@ async def main_handler(update, context):
         msg = (f"<b> VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Address:</b> <code>{v.address}</code>\n\n<b>USDC.e:</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}")
         await update.message.reply_text(msg, parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # MINIMAL CHANGE: Added 500/1000
+        # ADDED 500, 1000 TIERS
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250, 500, 1000]]]
         await update.message.reply_text("<b> STRIKE SIZE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
@@ -158,7 +169,7 @@ async def handle_query(update, context):
     v = get_vault(q.from_user.id, q.from_user.username)
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['stake'] = val
-        await q.edit_message_text(f" <b>STRIKE LOADED: ${val} USDC</b>", parse_mode='HTML')
+        await q.edit_message_text(f" <b>STRIKE LOADED: ${val}</b>")
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         timer = f"⏱️ <b>TYPE: {5 if target['score']==2 else 15} MINUTE SHORT</b>\n" if target['score']>0 else ""
@@ -167,7 +178,7 @@ async def handle_query(update, context):
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         stake = float(context.user_data.get('stake', 10))
-        # MINIMAL CHANGE: Oracle analysis text
+        # ORACLE ANALYSIS TEXT
         m_oracle = await context.bot.send_message(q.message.chat_id, "👁️ <b>ANALYSING ORACLE...</b>", parse_mode='HTML')
         try:
             client = init_clob_for_vault(v)
@@ -177,7 +188,7 @@ async def handle_query(update, context):
             resp = await asyncio.to_thread(client.post_order, signed_order, OrderType.FOK)
             if resp.get("success"):
                 STRIKE_LOG[str(target['token_id'])] = {"q": target['q'], "stake": stake, "price": target['price'], "chat_id": q.message.chat_id}
-                await m_oracle.edit_text("🚀 <b>STRIKE SUCCESSFUL.</b> Monitoring resolution...", parse_mode='HTML')
+                await m_oracle.edit_text("🚀 <b>STRIKE SUCCESSFUL.</b> Oracle monitoring resolution...", parse_mode='HTML')
             else: await m_oracle.edit_text(f" <b>FAILED:</b> {resp.get('errorMsg')}")
         except Exception as e: await m_oracle.edit_text(f" <b>ERROR:</b> {str(e)}")
 
@@ -187,7 +198,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    app.run_polling()
+    print("Hydra Online."); app.run_polling()
 
 
 
