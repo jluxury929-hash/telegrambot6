@@ -51,18 +51,23 @@ def get_user_vault(user_id, username=None):
     seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 3. DYNAMIC DATA BRIDGE (GUARANTEED ODDS) ---
+# --- 3. THE FIX: RELIABLE DATA BRIDGE ---
 async def fetch_guaranteed_odds(market_json):
+    """Pulls outcomePrices from Gamma and strictly parses them to fix 0 P/L."""
     try:
-        prices_raw = market_json.get('outcomePrices')
-        clob_ids_raw = market_json.get('clobTokenIds')
-        if not prices_raw or not clob_ids_raw: return None
-        prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
-        clob_ids = json.loads(clob_ids_raw) if isinstance(clob_ids_raw, str) else clob_ids_raw
-        if len(clob_ids) >= 2:
-            y_p, n_p = float(prices[0]), float(prices[1])
+        p_raw = market_json.get('outcomePrices')
+        c_raw = market_json.get('clobTokenIds')
+        
+        # Gamma API returns these as stringified JSON lists in some responses
+        prices = json.loads(p_raw) if isinstance(p_raw, str) else p_raw
+        clob_ids = json.loads(c_raw) if isinstance(c_raw, str) else c_raw
+        
+        if prices and clob_ids and len(prices) >= 2:
+            y_p = float(prices[0])
+            n_p = float(prices[1])
+            # Zero-Gate: Ensure market is active
             if y_p > 0.0001 and n_p > 0.0001:
-                return clob_ids[0], y_p, clob_ids[1], n_p
+                return str(clob_ids[0]), y_p, str(clob_ids[1]), n_p
     except: pass
     return None
 
@@ -88,12 +93,12 @@ async def force_scour():
     except: return False
 
 # --- 4. UI HANDLERS ---
-async def start(update, update_context):
+async def start(update, context):
     v = get_user_vault(update.effective_user.id, update.effective_user.username)
     btns = [['🚀 SCAN ALL', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"<b>Hydra Universal Online</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"<b>Hydra v440 Online</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
-async def main_handler(update, update_context):
+async def main_handler(update, context):
     cmd = update.message.text
     if 'SCAN' in cmd or 'REFRESH' in cmd:
         m = await update.message.reply_text("📡 <b>SCANNING ALL OPTIONS...</b>")
@@ -105,8 +110,8 @@ async def main_handler(update, update_context):
         v = get_user_vault(update.effective_user.id, update.effective_user.username)
         n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
-        msg = f"<b>VAULT CURRENCY AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e (Bridged):</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}"
-        kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
+        msg = f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e:</b> ${e_bal/1e6:.2f}\n<b>Native:</b> ${n_bal/1e6:.2f}"
+        kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
     elif 'CALIBRATE' in cmd:
@@ -114,16 +119,16 @@ async def main_handler(update, update_context):
         kb = [[InlineKeyboardButton(f"${x} Target", callback_data=f"SET_{x}")] for x in options]
         await update.message.reply_text("⚙️ <b>TARGET RETURN:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-async def handle_query(update, update_context):
+async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     v = get_user_vault(q.from_user.id, q.from_user.username)
     
     if "SET_" in q.data:
-        val = int(q.data.split("_")[1]); update_context.user_data['payout'] = val
+        val = int(q.data.split("_")[1]); context.user_data['payout'] = val
         await q.edit_message_text(f"✅ <b>STRIKE TARGET SET: ${val}</b>")
     
     elif q.data == "CONVERT_NATIVE":
-        m = await q.edit_message_text("📡 <b>PREPARING UNISWAP ROUTE...</b>", parse_mode='HTML')
+        m = await q.edit_message_text("📡 <b>CONVERTING...</b>", parse_mode='HTML')
         try:
             n_bal = usdc_n_contract.functions.balanceOf(v.address).call()
             params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": v.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
@@ -134,14 +139,15 @@ async def handle_query(update, update_context):
 
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        payout = update_context.user_data.get('payout', 100)
+        payout = context.user_data.get('payout', 100)
         
-        # LEGIT PROFIT MATH: Target * Price ensures accurate P/L
-        s_yes, s_no = target['y_pr'] * payout, target['n_pr'] * payout
+        # LEGIT PROFIT MATH: Target * Price
+        s_yes = float(target['y_pr']) * float(payout)
+        s_no = float(target['n_pr']) * float(payout)
         total_risk = s_yes + s_no
-        profit = payout - total_risk
+        profit = float(payout) - total_risk
         
-        update_context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
+        context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
         
         desc = (f"⚖️ <b>LEGIT ARB ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
                 f"<b>YES Stake:</b> ${s_yes:.2f} @ {target['y_pr']}\n"
@@ -151,13 +157,13 @@ async def handle_query(update, update_context):
         await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("1️⃣ CONFIRM YES LEG", callback_data=f"STP1_{idx}")]]), parse_mode='HTML')
 
     elif "STP1_" in q.data:
-        arb = update_context.user_data['active_arb']
-        await q.edit_message_text(f"✅ <b>YES STRIKE READY: ${arb['s_yes']:.2f}</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("2️⃣ CONFIRM NO LEG & EXECUTE", callback_data=f"EXE_{arb['idx']}")]]), parse_mode='HTML')
+        arb = context.user_data['active_arb']
+        await q.edit_message_text(f"✅ <b>YES READY: ${arb['s_yes']:.2f}</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("2️⃣ CONFIRM NO LEG & EXE", callback_data=f"EXE_{arb['idx']}")]]), parse_mode='HTML')
 
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        arb = update_context.user_data['active_arb']
-        m_proc = await update_context.bot.send_message(q.message.chat_id, "👁️ <b>EXECUTING DUAL-LEG BROADCAST...</b>")
+        arb = context.user_data['active_arb']
+        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>EXECUTING...</b>")
         try:
             client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
             client.set_api_creds(client.create_or_derive_api_creds())
