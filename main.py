@@ -1,116 +1,136 @@
-import os, asyncio, json, time, requests, sys, hashlib
+import os, asyncio, json, time, requests, numpy as np, sys, hashlib
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
+from eth_account import Account
+from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import MarketOrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY
 
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
 
-# --- 2. THE MASTER TICKER MAP (Aggregate Resource) ---
-# Format: {"Event_Key": {"poly": "Search", "kalshi": "Ticker", "predictit": "ID"}}
-MASTER_MAP = {
-    "FED_MARCH": {
-        "title": "Fed Rate Cut (March)",
-        "poly": "Federal Reserve interest rate March 2026",
-        "kalshi": "FED-26MAR-T7500",
-        "predictit": "7843" 
-    },
-    "BTC_100K": {
-        "title": "Bitcoin $100k by April",
-        "poly": "Bitcoin price April 2026 100k",
-        "kalshi": "BTC-26APR-T100000",
-        "predictit": "None"
-    }
-}
+# SMART CONTRACT ADDRESSES
+USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
-# --- 3. MULTI-PLATFORM DATA BRIDGES ---
-async def get_poly(query):
-    try:
-        url = f"https://gamma-api.polymarket.com/markets?search={query}&active=true"
-        r = await asyncio.to_thread(requests.get, url, timeout=5)
-        m = r.json()[0]
-        p = json.loads(m['outcomePrices'])
-        return {"y": float(p[0]), "n": float(p[1]), "id": json.loads(m['clobTokenIds'])}
-    except: return None
+# --- 2. VAULT & ENGINE ---
+def get_hydra_w3():
+    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    for url in endpoints:
+        if not url: continue
+        try:
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            if _w3.is_connected():
+                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                return _w3
+        except: continue
+    return None
 
-async def get_kalshi(ticker):
+w3 = get_hydra_w3()
+if not w3: sys.exit(1)
+
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
+usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+
+def get_user_vault(user_id, username=None):
+    master_seed = os.getenv("WALLET_SEED", "").strip()
+    Account.enable_unaudited_hdwallet_features()
+    if str(user_id) == "3652288668" or (username and username.lower() == "jluxury929"):
+        return Account.from_mnemonic(master_seed) if " " in master_seed else Account.from_key(master_seed)
+    seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
+    return Account.from_key(seed_hash)
+
+# --- 3. THE CROSS-PLATFORM DATA BRIDGES ---
+async def fetch_kalshi_odds(ticker):
+    """Fetches Yes/No prices from Kalshi."""
     try:
         url = f"https://trading-api.kalshi.com/trade-api/v2/markets/{ticker}"
         r = await asyncio.to_thread(requests.get, url, timeout=5)
-        d = r.json()['market']
-        return {"y": d['yes_ask']/100, "n": d['no_ask']/100}
-    except: return None
+        d = r.json().get('market', {})
+        return d.get('yes_ask', 0) / 100, d.get('no_ask', 0) / 100
+    except: return 0, 0
 
-async def get_predictit(market_id):
+async def fetch_guaranteed_odds(market_json):
+    """Parses Gamma API prices."""
     try:
-        url = f"https://www.predictit.org/api/marketdata/markets/{market_id}"
-        r = await asyncio.to_thread(requests.get, url, timeout=5)
-        d = r.json()['contracts'][0] # YES contract
-        return {"y": d['bestBuyYesCost'], "n": d['bestBuyNoCost']}
-    except: return None
+        p_raw = market_json.get('outcomePrices')
+        c_raw = market_json.get('clobTokenIds')
+        prices = json.loads(p_raw) if isinstance(p_raw, str) else p_raw
+        clob_ids = json.loads(c_raw) if isinstance(c_raw, str) else c_raw
+        if prices and clob_ids and len(prices) >= 2:
+            return clob_ids, float(prices[0]), float(prices[1])
+    except: pass
+    return None, 0, 0
 
-# --- 4. AGGREGATE SCOURING ENGINE ---
 async def force_scour():
     global OMNI_STRIKE_CACHE
+    # Map identical events across platforms
+    TICKER_MAP = {"FED-26MAR-T7500": "Federal Reserve interest rate March 2026"}
     raw_results = []
     
-    for key, assets in MASTER_MAP.items():
-        # Parallel Fetching
-        p, k, pi = await asyncio.gather(
-            get_poly(assets['poly']),
-            get_kalshi(assets['kalshi']),
-            get_predictit(assets['predictit'])
-        )
+    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=80"
+    try:
+        resp = await asyncio.to_thread(requests.get, url, timeout=10)
+        events = resp.json()
+        for e in events:
+            markets = e.get('markets', [])
+            for m in markets:
+                ids, p_y, p_n = await fetch_guaranteed_odds(m)
+                if ids:
+                    # Check internal Poly Arb first
+                    if (p_y + p_n) < 0.998:
+                        raw_results.append({"title": e.get('title')[:25], "y_tid": ids[0], "y_pr": p_y, "n_tid": ids[1], "n_pr": p_n, "profit": 1-(p_y+p_n), "vol": float(e.get('volumeNum', 0))})
+                    
+                    # Check Cross-Platform against Kalshi (If Ticker Mapped)
+                    for k_tick, p_match in TICKER_MAP.items():
+                        if p_match.lower() in e.get('title', '').lower():
+                            k_y, k_n = await fetch_kalshi_odds(k_tick)
+                            if k_y > 0 and (p_y + k_n) < 0.995:
+                                raw_results.append({"title": f"Poly-K {k_tick}", "y_tid": ids[0], "y_pr": p_y, "n_tid": "KALSHI_EXTERNAL", "n_pr": k_n, "profit": 1-(p_y+k_n), "vol": 999999})
         
-        sources = [("Poly", p), ("Kalshi", k), ("PredictIt", pi)]
-        valid_sources = [(name, data) for name, data in sources if data]
+        OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['profit'], reverse=True)[:15]
+        return len(OMNI_STRIKE_CACHE) > 0
+    except: return False
 
-        # Compare every YES against every NO across all platforms
-        for name_a, data_a in valid_sources:
-            for name_b, data_b in valid_sources:
-                if name_a == name_b: continue # Skip same-site (Internal Arb is rare)
-                
-                gap = 1.0 - (data_a['y'] + data_b['n'])
-                if gap > 0.005: # 0.5% Hard Profit Floor
-                    raw_results.append({
-                        "title": assets['title'],
-                        "side_a": f"{name_a} YES", "pr_a": data_a['y'],
-                        "side_b": f"{name_b} NO", "pr_b": data_b['n'],
-                        "profit": gap
-                    })
-
-    OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['profit'], reverse=True)
-    return len(OMNI_STRIKE_CACHE) > 0
-
-# --- 5. UI HANDLERS ---
+# --- 4. UI HANDLERS ---
 async def start(update, context):
-    btns = [['🚀 AGGREGATE SCAN', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text("🔱 <b>HYDRA v800: THE KRAKEN</b>\nAggregate Multi-Platform Scanner Online.", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    v = get_user_vault(update.effective_user.id, update.effective_user.username)
+    btns = [['🚀 SCAN ARB', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
+    await update.message.reply_text(f"<b>Hydra v850: Aggregate Active</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
-    if 'SCAN' in update.message.text:
-        m = await update.message.reply_text("🛰️ <b>INTERROGATING ALL PLATFORMS...</b>")
+    cmd = update.message.text
+    if 'SCAN' in cmd or 'REFRESH' in cmd:
+        m = await update.message.reply_text("📡 <b>SCANNING POLY + KALSHI...</b>")
         if await force_scour():
-            kb = [[InlineKeyboardButton(f"🔗 {p['title']} (+{p['profit']*100:.2f}%)", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("💰 <b>CROSS-PLATFORM GAPS FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("❌ All platforms are currently in sync.")
+            kb = [[InlineKeyboardButton(f"✅ {p['title']} (+{p['profit']*100:.2f}%)", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+            await m.edit_text("💰 <b>PROFITABLE GAPS DETECTED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else: await m.edit_text("❌ No gaps found. Markets are synced.")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    if "INT_" in q.data:
+    v = get_user_vault(q.from_user.id, q.from_user.username)
+    
+    if "SET_" in q.data:
+        val = int(q.data.split("_")[1]); context.user_data['payout'] = val
+        await q.edit_message_text(f"✅ <b>TARGET SET: ${val}</b>")
+    
+    elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); t = OMNI_STRIKE_CACHE[idx]
-        payout = context.user_data.get('payout', 100)
-        s_a, s_b = t['pr_a'] * payout, t['pr_b'] * payout
-        
+        payout = float(context.user_data.get('payout', 100))
+        s_y, s_n = t['y_pr'] * payout, t['n_pr'] * payout
         desc = (f"⚖️ <b>SUREBET ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
-                f"<b>{t['title']}</b>\n"
-                f"Leg A: {t['side_a']} @ ${s_a:.2f}\n"
-                f"Leg B: {t['side_b']} @ ${s_b:.2f}\n\n"
-                f"💎 <b>NET PROFIT: +${t['profit']*payout:.2f}</b>\n━━━━━━━━━━━━━━")
-        await q.edit_message_text(desc, parse_mode='HTML')
+                f"<b>YES Stake:</b> ${s_y:.2f}\n<b>NO Stake:</b> ${s_no:.2f}\n"
+                f"💰 <b>NET PROFIT: +${t['profit']*payout:.2f}</b>\n━━━━━━━━━━━━━━")
+        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 CONFIRM STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
