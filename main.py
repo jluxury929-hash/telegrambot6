@@ -48,55 +48,45 @@ def get_user_vault(user_id, username=None):
     seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 3. THE CROSS-PLATFORM DATA BRIDGES ---
-async def fetch_kalshi_odds(ticker):
-    """Fetches Yes/No prices from Kalshi."""
-    try:
-        url = f"https://trading-api.kalshi.com/trade-api/v2/markets/{ticker}"
-        r = await asyncio.to_thread(requests.get, url, timeout=5)
-        d = r.json().get('market', {})
-        return d.get('yes_ask', 0) / 100, d.get('no_ask', 0) / 100
-    except: return 0, 0
-
+# --- 3. THE ALPHA FILTER (ANTI-FAIR MARKET) ---
 async def fetch_guaranteed_odds(market_json):
-    """Parses Gamma API prices."""
+    """Pulls odds and strictly filters out any Fair Markets (P/L = 0)."""
     try:
         p_raw = market_json.get('outcomePrices')
         c_raw = market_json.get('clobTokenIds')
         prices = json.loads(p_raw) if isinstance(p_raw, str) else p_raw
         clob_ids = json.loads(c_raw) if isinstance(c_raw, str) else c_raw
+        
         if prices and clob_ids and len(prices) >= 2:
-            return clob_ids, float(prices[0]), float(prices[1])
+            y_p = float(prices[0])
+            n_p = float(prices[1])
+            
+            # THE HARD GATE: If the sum is >= 0.998, it's too close to a Fair Market.
+            # We ONLY allow markets where a real mathematical gap exists.
+            if (y_p + n_p) < 0.998 and y_p > 0.005:
+                return str(clob_ids[0]), y_p, str(clob_ids[1]), n_p
     except: pass
-    return None, 0, 0
+    return None
 
 async def force_scour():
     global OMNI_STRIKE_CACHE
-    # Map identical events across platforms
-    TICKER_MAP = {"FED-26MAR-T7500": "Federal Reserve interest rate March 2026"}
+    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100"
     raw_results = []
-    
-    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=80"
     try:
         resp = await asyncio.to_thread(requests.get, url, timeout=10)
-        events = resp.json()
-        for e in events:
+        for e in resp.json():
             markets = e.get('markets', [])
             for m in markets:
-                ids, p_y, p_n = await fetch_guaranteed_odds(m)
-                if ids:
-                    # Check internal Poly Arb first
-                    if (p_y + p_n) < 0.998:
-                        raw_results.append({"title": e.get('title')[:25], "y_tid": ids[0], "y_pr": p_y, "n_tid": ids[1], "n_pr": p_n, "profit": 1-(p_y+p_n), "vol": float(e.get('volumeNum', 0))})
-                    
-                    # Check Cross-Platform against Kalshi (If Ticker Mapped)
-                    for k_tick, p_match in TICKER_MAP.items():
-                        if p_match.lower() in e.get('title', '').lower():
-                            k_y, k_n = await fetch_kalshi_odds(k_tick)
-                            if k_y > 0 and (p_y + k_n) < 0.995:
-                                raw_results.append({"title": f"Poly-K {k_tick}", "y_tid": ids[0], "y_pr": p_y, "n_tid": "KALSHI_EXTERNAL", "n_pr": k_n, "profit": 1-(p_y+k_n), "vol": 999999})
-        
-        OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['profit'], reverse=True)[:15]
+                res = await fetch_guaranteed_odds(m)
+                if res:
+                    y_id, y_p, n_id, n_p = res
+                    raw_results.append({
+                        "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, 
+                        "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
+                    })
+                    break 
+        # Sort by volume to ensure we can actually execute the trades
+        OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['vol'], reverse=True)[:15]
         return len(OMNI_STRIKE_CACHE) > 0
     except: return False
 
@@ -104,33 +94,53 @@ async def force_scour():
 async def start(update, context):
     v = get_user_vault(update.effective_user.id, update.effective_user.username)
     btns = [['🚀 SCAN ARB', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"<b>Hydra v850: Aggregate Active</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"<b>Hydra v500 Alpha</b>\nFair Markets: ❌ Blocked", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'SCAN' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING POLY + KALSHI...</b>")
+        m = await update.message.reply_text("📡 <b>HUNTING FOR PROFIT GAPS...</b>")
         if await force_scour():
-            kb = [[InlineKeyboardButton(f"✅ {p['title']} (+{p['profit']*100:.2f}%)", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("💰 <b>PROFITABLE GAPS DETECTED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("❌ No gaps found. Markets are synced.")
+            kb = [[InlineKeyboardButton(f"✅ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+            await m.edit_text("💰 <b>NON-ZERO PROFIT TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else:
+            await m.edit_text("❌ No profitable gaps found. Markets are currently balanced.")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     v = get_user_vault(q.from_user.id, q.from_user.username)
     
-    if "SET_" in q.data:
-        val = int(q.data.split("_")[1]); context.user_data['payout'] = val
-        await q.edit_message_text(f"✅ <b>TARGET SET: ${val}</b>")
-    
-    elif "INT_" in q.data:
-        idx = int(q.data.split("_")[1]); t = OMNI_STRIKE_CACHE[idx]
+    if "INT_" in q.data:
+        idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         payout = float(context.user_data.get('payout', 100))
-        s_y, s_n = t['y_pr'] * payout, t['n_pr'] * payout
-        desc = (f"⚖️ <b>SUREBET ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
-                f"<b>YES Stake:</b> ${s_y:.2f}\n<b>NO Stake:</b> ${s_no:.2f}\n"
-                f"💰 <b>NET PROFIT: +${t['profit']*payout:.2f}</b>\n━━━━━━━━━━━━━━")
-        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 CONFIRM STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
+        
+        # MATH: Stake = Payout * Price
+        s_yes = target['y_pr'] * payout
+        s_no = target['n_pr'] * payout
+        profit = payout - (s_yes + s_no)
+        
+        context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
+        
+        desc = (f"⚖️ <b>GUARANTEED P/L ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
+                f"<b>Asset:</b> {target['title']}\n"
+                f"<b>YES Stake:</b> ${s_yes:.2f}\n"
+                f"<b>NO Stake:</b> ${s_no:.2f}\n\n"
+                f"💎 <b>IMPLIED PROFIT: +${profit:.4f}</b>\n━━━━━━━━━━━━━━")
+        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 EXECUTE STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
+
+    elif "EXE_" in q.data:
+        idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
+        arb = context.user_data['active_arb']
+        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>STRIKING...</b>")
+        try:
+            client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
+            client.set_api_creds(client.create_or_derive_api_creds())
+            for tid, stake in [(target['y_tid'], arb['s_yes']), (target['n_tid'], arb['s_no'])]:
+                args = MarketOrderArgs(token_id=str(tid), amount=stake, side=BUY, price=0.999)
+                signed = await asyncio.to_thread(client.create_order, args)
+                await asyncio.to_thread(client.post_order, signed, OrderType.FOK)
+            await m_proc.edit_text("🚀 <b>STRIKE SUCCESSFUL. PROFIT LOCKED.</b>")
+        except Exception as e: await m_proc.edit_text(f"⚠️ <b>ERROR:</b> {str(e)[:45]}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
