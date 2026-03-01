@@ -14,7 +14,9 @@ from py_clob_client.order_builder.constants import BUY
 getcontext().prec = 28
 load_dotenv()
 OMNI_STRIKE_CACHE = []
+STRIKE_LOG = {}
 
+# Visual Branding
 HYDRA_LOGO = """
 <code>╔╗ ╔╗      ╔╗
 ║║ ║║      ║║
@@ -30,8 +32,10 @@ SEP = "<b>◈──────────────────────�
 # SMART CONTRACT ADDRESSES
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
-# --- 2. ENGINE & VAULT ---
+# --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
     rpc = os.getenv("RPC_URL", "https://polygon-rpc.com")
     _w3 = Web3(Web3.HTTPProvider(rpc))
@@ -39,11 +43,12 @@ def get_hydra_w3():
     return _w3
 
 w3 = get_hydra_w3()
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"type":"function"}]')
 usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
 def get_vault(uid, username=None):
+    """Deterministic Vault Derivation: unique wallet per user."""
     master = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     if str(uid) == "3652288668" or (username and username.lower() == "jluxury929"):
@@ -55,7 +60,6 @@ def get_vault(uid, username=None):
 async def start(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
     menu = [['⚡️ QUICK SCAN', '🔧 CALIBRATE'], ['🏦 VAULT HUB', '🔄 REBOOT']]
-    # Set keyboard to be persistent and resize
     reply_markup = ReplyKeyboardMarkup(menu, resize_keyboard=True, is_persistent=True)
     
     msg = (
@@ -71,7 +75,6 @@ async def start(update, context):
 
 async def vault_audit(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
-    # Using asyncio.to_thread to prevent blocking the event loop
     n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
     e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
     
@@ -83,31 +86,28 @@ async def vault_audit(update, context):
         f"{SEP}\n"
         f"<b>TOTAL LIQUIDITY:</b> <code>${(n_bal+e_bal)/1e6:,.2f}</code>"
     )
-    # Ensure conversion buttons only show if balance is sufficient
-    kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT")]] if n_bal > 1e6 else []
+    kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
 async def main_handler(update, context):
-    # Capture the message text and clean it for matching
-    text = update.message.text.upper()
+    cmd = update.message.text.upper() 
     
-    # BROAD MATCHING: Triggers if the keyword is anywhere in the button text
-    if 'SCAN' in text:
-        await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
+    if 'SCAN' in cmd:
+        loading = await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
+        kb = [[InlineKeyboardButton("🎯 BTC > 100k (Yes/No)", callback_data="INT_0")]]
+        await loading.edit_text(f"{GLOW} <b>LIVE STRIKE TARGETS</b> {GLOW}\n{BANNER}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     
-    elif 'VAULT' in text:
-        # This triggers the VAULT HUB audit
+    elif 'VAULT' in cmd:
         await vault_audit(update, context)
         
-    elif 'CALIBRATE' in text:
+    elif 'CALIBRATE' in cmd:
         options = [10, 50, 100, 250, 500, 1000]
-        kb = [[InlineKeyboardButton(f"${x} Target Capacity", callback_data=f"SET_{x}")] for x in options]
+        kb = [[InlineKeyboardButton(f"${x} Target", callback_data=f"SET_{x}")] for x in options]
         await update.message.reply_text(f"🔧 <b>SET STRIKE CAPACITY:</b>\n{SEP}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     
-    elif 'REBOOT' in text:
+    elif 'REBOOT' in cmd:
         await start(update, context)
 
-# (handle_query logic remains same as provided)
 async def handle_query(update, context):
     q = update.callback_query
     await q.answer()
@@ -116,7 +116,7 @@ async def handle_query(update, context):
 
     if "SET_" in q.data:
         val = int(q.data.split("_")[1])
-        context.user_data['payout'] = val
+        context.user_data['stake'] = val
         await q.edit_message_text(f"✅ <b>CAPACITY ARMED: ${val}</b>")
 
     elif "INT_" in q.data:
@@ -127,7 +127,7 @@ async def handle_query(update, context):
             f"🔴 <b>NO:</b> <code>$0.46</code>\n"
             f"📊 <b>MARKET GAP:</b> <code>+2.4%</code>\n"
             f"{BANNER}\n"
-            f"<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('payout', 100):.2f}</code>"
+            f"<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('stake', 10):.2f}</code>"
         )
         kb = [[InlineKeyboardButton("🔥 INITIATE STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
