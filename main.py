@@ -1,152 +1,89 @@
-import os, asyncio, json, time, requests, numpy as np, sys, hashlib
-from decimal import Decimal, getcontext
-from dotenv import load_dotenv
-from eth_account import Account
+import os, asyncio, json, time, hashlib
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY
+from eth_account import Account
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 
-# --- 1. CORE CONFIG ---
-getcontext().prec = 28
-load_dotenv()
-OMNI_STRIKE_CACHE = []
+# --- 1. AZURO PROTOCOL CONFIG (POLYGON 2026) ---
+POLYGON_RPC = "https://polygon-rpc.com"
+USDT_POLYGON = Web3.to_checksum_address("0xc2132D05D31c914a87C6611C10748AEb04B58e8F")
+AZURO_LP = Web3.to_checksum_address("0x7043a09d3711D883234907a7E09117600863953C") # Example LP
+PREMATCH_CORE = Web3.to_checksum_address("0x123456789...replace_with_current_core")
 
-# SMART CONTRACT ADDRESSES
-USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
+# Simplified ABI for Azuro LP Bet function
+AZURO_LP_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"core","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"components":[{"internalType":"uint256","name":"affiliate","type":"address"},{"internalType":"uint64","name":"minOdds","type":"uint64"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"betData","type":"tuple"}],"name":"bet","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 
-# --- 2. VAULT & ENGINE ---
-def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
-    for url in endpoints:
-        if not url: continue
-        try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
-            if _w3.is_connected():
-                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                return _w3
-        except: continue
-    return None
+w3 = Web3(Web3.HTTPProvider(POLYGON_RPC))
+w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-w3 = get_hydra_w3()
-if not w3: sys.exit(1)
-
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"}]')
-usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
-usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-
-def get_user_vault(user_id, username=None):
-    master_seed = os.getenv("WALLET_SEED", "").strip()
-    Account.enable_unaudited_hdwallet_features()
-    if str(user_id) == "3652288668" or (username and username.lower() == "jluxury929"):
-        return Account.from_mnemonic(master_seed) if " " in master_seed else Account.from_key(master_seed)
+# --- 2. DETERMINISTIC VAULT ---
+def get_user_vault(user_id):
+    master_seed = os.getenv("WALLET_SEED", "your_secret_seed")
     seed_hash = hashlib.sha256(f"{master_seed}:{user_id}".encode()).hexdigest()
-    return Account.from_key(seed_hash)
+    Account.enable_unaudited_hdwallet_features()
+    return Account.from_key("0x" + seed_hash)
 
-# --- 3. THE ALPHA FILTER (ANTI-FAIR MARKET) ---
-async def fetch_guaranteed_odds(market_json):
-    """Pulls odds and strictly filters out any Fair Markets (P/L = 0)."""
-    try:
-        p_raw = market_json.get('outcomePrices')
-        c_raw = market_json.get('clobTokenIds')
-        prices = json.loads(p_raw) if isinstance(p_raw, str) else p_raw
-        clob_ids = json.loads(c_raw) if isinstance(c_raw, str) else c_raw
-        
-        if prices and clob_ids and len(prices) >= 2:
-            y_p = float(prices[0])
-            n_p = float(prices[1])
-            
-            # THE HARD GATE: If the sum is >= 0.998, it's too close to a Fair Market.
-            # We ONLY allow markets where a real mathematical gap exists.
-            if (y_p + n_p) < 0.998 and y_p > 0.005:
-                return str(clob_ids[0]), y_p, str(clob_ids[1]), n_p
-    except: pass
-    return None
-
-async def force_scour():
-    global OMNI_STRIKE_CACHE
-    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100"
-    raw_results = []
-    try:
-        resp = await asyncio.to_thread(requests.get, url, timeout=10)
-        for e in resp.json():
-            markets = e.get('markets', [])
-            for m in markets:
-                res = await fetch_guaranteed_odds(m)
-                if res:
-                    y_id, y_p, n_id, n_p = res
-                    raw_results.append({
-                        "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, 
-                        "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
-                    })
-                    break 
-        # Sort by volume to ensure we can actually execute the trades
-        OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['vol'], reverse=True)[:15]
-        return len(OMNI_STRIKE_CACHE) > 0
-    except: return False
-
-# --- 4. UI HANDLERS ---
-async def start(update, context):
-    v = get_user_vault(update.effective_user.id, update.effective_user.username)
-    btns = [['🚀 SCAN ARB', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"<b>Hydra v500 Alpha</b>\nFair Markets: ❌ Blocked", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
-
-async def main_handler(update, context):
-    cmd = update.message.text
-    if 'SCAN' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>HUNTING FOR PROFIT GAPS...</b>")
-        if await force_scour():
-            kb = [[InlineKeyboardButton(f"✅ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("💰 <b>NON-ZERO PROFIT TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else:
-            await m.edit_text("❌ No profitable gaps found. Markets are currently balanced.")
-
-async def handle_query(update, context):
-    q = update.callback_query; await q.answer()
-    v = get_user_vault(q.from_user.id, q.from_user.username)
+# --- 3. ON-CHAIN EXECUTION ---
+async def execute_azuro_bet(user_id, condition_id, outcome_id, amount_usdt, odds):
+    """
+    Directly interacts with the Azuro Smart Contract on Polygon.
+    """
+    vault = get_user_vault(user_id)
+    lp_contract = w3.eth.contract(address=AZURO_LP, abi=AZURO_LP_ABI)
     
-    if "INT_" in q.data:
-        idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        payout = float(context.user_data.get('payout', 100))
-        
-        # MATH: Stake = Payout * Price
-        s_yes = target['y_pr'] * payout
-        s_no = target['n_pr'] * payout
-        profit = payout - (s_yes + s_no)
-        
-        context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
-        
-        desc = (f"⚖️ <b>GUARANTEED P/L ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
-                f"<b>Asset:</b> {target['title']}\n"
-                f"<b>YES Stake:</b> ${s_yes:.2f}\n"
-                f"<b>NO Stake:</b> ${s_no:.2f}\n\n"
-                f"💎 <b>IMPLIED PROFIT: +${profit:.4f}</b>\n━━━━━━━━━━━━━━")
-        await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 EXECUTE STRIKE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
+    # Encode the specific bet data (ConditionID + OutcomeID)
+    # Azuro uses specific byte encoding for its 'data' field
+    encoded_data = w3.eth.abi.encode(['uint256', 'uint64'], [condition_id, outcome_id])
+    
+    # 12-decimal precision for Azuro odds (e.g., 2.0 = 2 * 10^12)
+    min_odds_raw = int(odds * 10**12) 
+    amount_raw = int(amount_usdt * 10**6) # USDT has 6 decimals
+    
+    nonce = w3.eth.get_transaction_count(vault.address)
+    deadline = int(time.time() + 600) # 10 minute deadline
 
-    elif "EXE_" in q.data:
-        idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        arb = context.user_data['active_arb']
-        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>STRIKING...</b>")
-        try:
-            client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
-            client.set_api_creds(client.create_or_derive_api_creds())
-            for tid, stake in [(target['y_tid'], arb['s_yes']), (target['n_tid'], arb['s_no'])]:
-                args = MarketOrderArgs(token_id=str(tid), amount=stake, side=BUY, price=0.999)
-                signed = await asyncio.to_thread(client.create_order, args)
-                await asyncio.to_thread(client.post_order, signed, OrderType.FOK)
-            await m_proc.edit_text("🚀 <b>STRIKE SUCCESSFUL. PROFIT LOCKED.</b>")
-        except Exception as e: await m_proc.edit_text(f"⚠️ <b>ERROR:</b> {str(e)[:45]}")
+    # Build Transaction
+    tx = lp_contract.functions.bet(
+        PREMATCH_CORE,
+        amount_raw,
+        deadline,
+        (Web3.to_checksum_address("0x0000000000000000000000000000000000000000"), # No affiliate
+         min_odds_raw,
+         encoded_data)
+    ).build_transaction({
+        'from': vault.address,
+        'nonce': nonce,
+        'gas': 400000,
+        'gasPrice': w3.eth.gas_price
+    })
+
+    signed_tx = w3.eth.account.sign_transaction(tx, vault.key)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+    return w3.to_hex(tx_hash)
+
+# --- 4. BOT HANDLERS ---
+async def start(update, context):
+    v = get_user_vault(update.effective_user.id)
+    msg = f"🛰️ **AZURO-HYDRA ONLINE**\nVault: `{v.address}`\nNetwork: Polygon POS"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def bet_handler(update, context):
+    # Usage: /strike [cond_id] [outcome_id] [amount] [odds]
+    uid = update.effective_user.id
+    c_id, o_id, amt, odds = map(float, context.args)
+    
+    m = await update.message.reply_text("⛓️ **BROADCASTING TO POLYGON...**")
+    try:
+        tx_h = await execute_azuro_bet(uid, int(c_id), int(o_id), amt, odds)
+        await m.edit_text(f"✅ **STRIKE SUCCESSFUL**\nTx: [PolygonScan](https://polygonscan.com/tx/{tx_h})", parse_mode='Markdown')
+    except Exception as e:
+        await m.edit_text(f"❌ **FAILED:** {str(e)[:50]}")
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    app = ApplicationBuilder().token("YOUR_TELEGRAM_TOKEN").build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_query))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+    app.add_handler(CommandHandler("strike", bet_handler))
     app.run_polling()
 
 
