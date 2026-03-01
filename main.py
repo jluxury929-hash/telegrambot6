@@ -99,8 +99,7 @@ async def check_win_status(context):
                         msg = (f" <b>STRIKE RESOLVED: WINNER</b>\n"
                                f"━━━━━━━━━━━━━━\n"
                                f"<b>Target:</b> {data['q']}\n"
-                               f"<b>Net Profit:</b> +${profit:.2f} USDC\n"
-                               f"<b>ROI:</b> {((profit/data['stake'])*100):.1f}%")
+                               f"<b>Net Profit:</b> +${profit:.2f} USDC\n")
                         await context.bot.send_message(data['chat_id'], msg, parse_mode='HTML')
                         del STRIKE_LOG[tid]
     except: pass
@@ -118,22 +117,13 @@ async def force_scour():
                 m_list = e.get('markets', [])
                 if m_list:
                     m = m_list[0]
-                    cond_id = m.get('conditionId')
-                    if cond_id:
-                        tid, pr = await fetch_market_data(cond_id)
-                        if tid:
-                            # MINIMAL CHANGE: Priority scoring
-                            score = 2 if "5-minute" in title else 1 if "15-minute" in title else 0
-                            raw_results.append({
-                                "title": e.get('title')[:25],
-                                "q": m.get('question'),
-                                "token_id": tid,
-                                "price": pr,
-                                "vol": float(e.get('volumeNum', 0)),
-                                "score": score
-                            })
+                    tid, pr = await fetch_market_data(m.get('conditionId'))
+                    if tid:
+                        # MINIMAL CHANGE: Priority scoring
+                        score = 2 if "5-minute" in title else 1 if "15-minute" in title else 0
+                        raw_results.append({"title": e.get('title')[:25], "q": m.get('question'), "token_id": tid, "price": pr, "vol": float(e.get('volumeNum', 0)), "score": score})
         if raw_results:
-            # MINIMAL CHANGE: Sort by score then volume
+            # MINIMAL CHANGE: Priority sort
             raw_results.sort(key=lambda x: (x['score'], x['vol']), reverse=True)
             OMNI_STRIKE_CACHE = raw_results[:10]
             return True
@@ -150,19 +140,16 @@ async def main_handler(update, context):
     if 'START SNIPER' in cmd or 'REFRESH' in cmd:
         m = await update.message.reply_text(" <b>SCANNING CRYPTO MARKETS...</b>", parse_mode='HTML')
         if await force_scour():
-            # MINIMAL CHANGE: Added emoji indicator
-            kb = [[InlineKeyboardButton(f"{'⚡' if p['score']>0 else ' '} {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+            kb = [[InlineKeyboardButton(f"{'⚡' if p['score']>0 else ''} {p['title']} (${p['price']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
             await m.edit_text("<b> ACTIVE CRYPTO TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text(" <b>NO CRYPTO MARKETS FOUND.</b>")
     elif 'VAULT' in cmd:
         v = get_vault(update.effective_user.id, update.effective_user.username)
         n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
         msg = (f"<b> VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Address:</b> <code>{v.address}</code>\n\n<b>USDC.e:</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}")
-        kb = [[InlineKeyboardButton(" CONVERT NATIVE", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
-        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
+        await update.message.reply_text(msg, parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # MINIMAL CHANGE: Added 500, 1000
+        # MINIMAL CHANGE: Added 500/1000
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250, 500, 1000]]]
         await update.message.reply_text("<b> STRIKE SIZE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
@@ -172,25 +159,15 @@ async def handle_query(update, context):
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['stake'] = val
         await q.edit_message_text(f" <b>STRIKE LOADED: ${val} USDC</b>", parse_mode='HTML')
-    elif q.data == "CONVERT_NATIVE":
-        m = await q.edit_message_text(" <b>PREPARING ROUTE...</b>", parse_mode='HTML')
-        try:
-            n_bal = usdc_n_contract.functions.balanceOf(v.address).call()
-            params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": v.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
-            tx = swap_router.functions.exactInputSingle(params).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
-            tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
-            await m.edit_text(f" <b>BROADCASTED:</b> <code>{tx_hash.hex()[:20]}</code>", parse_mode='HTML')
-        except Exception as e: await m.edit_text(f" <b>FAILED:</b> {str(e)[:40]}")
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        # MINIMAL CHANGE: Added Short description
-        timer = f"<b>⏱️ TYPE: {5 if target['score']==2 else 15} MINUTE SHORT</b>\n" if target['score']>0 else ""
+        timer = f"⏱️ <b>TYPE: {5 if target['score']==2 else 15} MINUTE SHORT</b>\n" if target['score']>0 else ""
         kb = [[InlineKeyboardButton(" EXECUTE ATOMIC STRIKE", callback_data=f"EXE_{idx}")]]
         await q.edit_message_text(f"<b> TARGET:</b> {target['q']}\n{timer}<b> EST. PRICE:</b> ${target['price']}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         stake = float(context.user_data.get('stake', 10))
-        # MINIMAL CHANGE: ANALYSING ORACLE Proof
+        # MINIMAL CHANGE: Oracle analysis text
         m_oracle = await context.bot.send_message(q.message.chat_id, "👁️ <b>ANALYSING ORACLE...</b>", parse_mode='HTML')
         try:
             client = init_clob_for_vault(v)
@@ -199,21 +176,18 @@ async def handle_query(update, context):
             signed_order = await asyncio.to_thread(client.create_order, order_args)
             resp = await asyncio.to_thread(client.post_order, signed_order, OrderType.FOK)
             if resp.get("success"):
-                pot_profit = (stake / target['price']) - stake; odds = 1 / target['price']
-                msg = (f" <b>STRIKE CONFIRMED</b>\n━━━━━━━━━━━━━━\n<b>Market:</b> {target['q']}\n<b>Stake:</b> ${stake}\n<b>Odds:</b> {odds:.2f}x\n<b>Profit:</b> +${pot_profit:.2f}\n━━━━━━━━━━━━━━")
                 STRIKE_LOG[str(target['token_id'])] = {"q": target['q'], "stake": stake, "price": target['price'], "chat_id": q.message.chat_id}
-                await m_oracle.edit_text(msg, parse_mode='HTML')
+                await m_oracle.edit_text("🚀 <b>STRIKE SUCCESSFUL.</b> Monitoring resolution...", parse_mode='HTML')
             else: await m_oracle.edit_text(f" <b>FAILED:</b> {resp.get('errorMsg')}")
         except Exception as e: await m_oracle.edit_text(f" <b>ERROR:</b> {str(e)}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-    if app.job_queue:
-        app.job_queue.run_repeating(check_win_status, interval=60, first=10)
+    if app.job_queue: app.job_queue.run_repeating(check_win_status, interval=15, first=10)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print(" Hydra Crypto Pulse Active."); app.run_polling()
+    app.run_polling()
 
 
 
