@@ -15,7 +15,7 @@ from py_clob_client.order_builder.constants import BUY
 getcontext().prec = 28
 load_dotenv()
 
-ARBI_CACHE = [] # Global cache for detected arbitrage opportunities
+ARBI_CACHE = [] 
 
 # SMART CONTRACT ADDRESSES
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
@@ -29,10 +29,10 @@ LOGO = """
 ███████║██████╔╝█████╗    ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-ARBI-HYDRA</code>
+╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-FIXED-ABI</code>
 """
 
-# --- 2. HYDRA ENGINE ---
+# --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
     endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in endpoints:
@@ -49,8 +49,16 @@ w3 = get_hydra_w3()
 if not w3:
     print("FATAL: RPC Failure."); import sys; sys.exit(1)
 
-ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","uint256"}],"type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","uint256"}],"name":"approve","outputs":[{"name":"success","bool"}],"type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","uint256"}],"type":"function"}]')
-UNISWAP_ABI = json.loads('[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]')
+# FIXED: Using Python Lists instead of JSON strings to prevent DecodeErrors
+ERC20_ABI = [
+    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
+    {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"},
+    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}], "name": "allowance", "outputs": [{"name": "remaining", "type": "uint256"}], "type": "function"}
+]
+
+UNISWAP_ABI = [
+    {"inputs": [{"components": [{"internalType": "address", "name": "tokenIn", "type": "address"}, {"internalType": "address", "name": "tokenOut", "type": "address"}, {"internalType": "uint24", "name": "fee", "type": "uint24"}, {"internalType": "address", "name": "recipient", "type": "address"}, {"internalType": "uint256", "name": "deadline", "type": "uint256"}, {"internalType": "uint256", "name": "amountIn", "type": "uint256"}, {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"}, {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"}], "internalType": "struct ISwapRouter.ExactInputSingleParams", "name": "params", "type": "tuple"}], "name": "exactInputSingle", "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}], "stateMutability": "payable", "type": "function"}
+]
 
 usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
@@ -78,22 +86,16 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. ARBITRAGE MATH ENGINE ---
-def calculate_arbitrage_stakes(p_yes, p_no, total_capital):
-    """
-    Implements Gambling Arbitrage Logic.
-    Polymarket prices are probabilities (0.10 = $0.10 per share).
-    Arbitrage exists if (p_yes + p_no) < 1.0
-    """
+# --- 4. ARBITRAGE ENGINE ---
+
+def calculate_arbitrage(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
-    if combined_prob >= 0.998: # Buffer for slippage/fees
+    if combined_prob >= 0.998: # 0.2% buffer for slippage
         return None
 
-    # Calculate optimal distribution to equalize payout
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
     
-    # Expected Payout calculation
     expected_payout = (stake_yes / p_yes) 
     profit = expected_payout - total_capital
     roi = (profit / total_capital) * 100
@@ -105,48 +107,39 @@ def calculate_arbitrage_stakes(p_yes, p_no, total_capital):
         "roi": round(roi, 2)
     }
 
-# --- 5. DATA BRIDGE ---
 async def fetch_full_market(cond_id):
     try:
         url = f"https://clob.polymarket.com/markets/{cond_id}"
         r = await asyncio.to_thread(requests.get, url, timeout=5)
         d = r.json()
-        # Polymarket returns an array of tokens; extract Yes and No
-        tokens = {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
-        return tokens
+        return {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
     except: return None
 
 async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
-    # Search top volume tags (Politics, Crypto, Sports)
     tags = [1, 10, 100]
     for tag in tags:
         url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=15&tag_id={tag}"
         try:
             resp = await asyncio.to_thread(requests.get, url, timeout=5)
-            for event in resp.json():
-                markets = event.get('markets', [])
-                if not markets: continue
-                
-                # Fetch full book for Yes/No comparison
-                m_data = await fetch_full_market(markets[0]['conditionId'])
+            for e in resp.json():
+                m = e.get('markets', [])
+                if not m: continue
+                m_data = await fetch_full_market(m[0]['conditionId'])
                 if m_data and 'YES' in m_data and 'NO' in m_data:
-                    p_y, p_n = m_data['YES']['price'], m_data['NO']['price']
-                    
-                    arb = calculate_arbitrage_stakes(p_y, p_n, 100.0)
-                    if arb and arb['roi'] > 0.3: # Minimum 0.3% ROI threshold
+                    arb = calculate_arbitrage(m_data['YES']['price'], m_data['NO']['price'], 100.0)
+                    if arb and arb['roi'] > 0.3:
                         ARBI_CACHE.append({
-                            "title": event.get('title')[:30],
-                            "yes_id": m_data['YES']['id'],
-                            "no_id": m_data['NO']['id'],
-                            "p_y": p_y, "p_n": p_n,
+                            "title": e.get('title')[:30],
+                            "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'],
+                            "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'],
                             "roi": arb['roi']
                         })
         except: continue
     return len(ARBI_CACHE) > 0
 
-# --- 6. UI & COMMAND HANDLERS ---
+# --- 5. UI HANDLERS ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔄 REFRESH']]
     await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
@@ -154,54 +147,38 @@ async def start(update, context):
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START ARBI-SCAN' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING ORDERBOOKS...</b>", parse_mode='HTML')
+        m = await update.message.reply_text("📡 <b>SCANNING...</b>", parse_mode='HTML')
         if await scour_arbitrage():
             kb = [[InlineKeyboardButton(f"⚖️ {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE)]
-            await m.edit_text("<b>ARBITRAGE OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else:
-            await m.edit_text("🛰 <b>NO DISCREPANCIES FOUND.</b>")
+            await m.edit_text("<b>OPPORTUNITIES FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
 
     elif 'VAULT' in cmd:
-        n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(vault.address).call)
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(vault.address).call)
-        msg = f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e (Trading):</b> ${e_bal/1e6:.2f}\n<b>Native USDC:</b> ${n_bal/1e6:.2f}"
-        kb = [[InlineKeyboardButton("🔄 CONVERT NATIVE", callback_data="CONVERT_NATIVE")]] if n_bal > 1e6 else None
-        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e:</b> ${e_bal/1e6:.2f}", parse_mode='HTML')
 
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [25, 100, 500, 1000]]]
-        await update.message.reply_text("🎯 <b>SET TOTAL ARBITRAGE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [50, 100, 250, 500]]]
+        await update.message.reply_text("🎯 <b>SET CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 10))
 
     if "SET_" in q.data:
-        val = int(q.data.split("_")[1])
-        context.user_data['stake'] = val
-        await q.edit_message_text(f"✅ <b>STRIKE CAPITAL SET TO: ${val}</b>")
+        context.user_data['stake'] = int(q.data.split("_")[1])
+        await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
 
     elif "ARB_" in q.data:
-        idx = int(q.data.split("_")[1])
-        target = ARBI_CACHE[idx]
-        calc = calculate_arbitrage_stakes(target['p_y'], target['p_n'], stake)
-        
-        msg = (f"<b>ARBITRAGE STRATEGY</b>\n"
-               f"Target: {target['title']}\n\n"
-               f"🔵 Buy YES: ${calc['stake_yes']} @ {target['p_y']}\n"
-               f"🔴 Buy NO: ${calc['stake_no']} @ {target['p_n']}\n"
-               f"━━━━━━━━━━━━━━\n"
-               f"<b>Profit:</b> ${calc['profit']} ({calc['roi']}%)")
-        
-        kb = [[InlineKeyboardButton("🔥 EXECUTE DUAL-STRIKE", callback_data=f"EXE_{idx}")]]
+        target = ARBI_CACHE[int(q.data.split("_")[1])]
+        calc = calculate_arbitrage(target['p_y'], target['p_n'], stake)
+        msg = f"<b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
+        kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif "EXE_" in q.data:
-        idx = int(q.data.split("_")[1])
-        target = ARBI_CACHE[idx]
-        calc = calculate_arbitrage_stakes(target['p_y'], target['p_n'], stake)
-        
-        # Sequentially execute the arbitrage legs
+        target = ARBI_CACHE[int(q.data.split("_")[1])]
+        calc = calculate_arbitrage(target['p_y'], target['p_n'], stake)
         results = []
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
@@ -211,17 +188,14 @@ async def handle_query(update, context):
                 resp = await asyncio.to_thread(clob_client.post_order, signed, OrderType.FOK)
                 results.append(resp.get("success", False))
             except: results.append(False)
-        
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>PARTIAL FILL / ERROR</b>"
-        await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
+        await context.bot.send_message(q.message.chat_id, "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>", parse_mode='HTML')
 
-# --- 7. MAIN RUNTIME ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Pulse Active. Scanning for inefficiencies..."); app.run_polling()
+    print("Hydra Online."); app.run_polling()
 
 
 
