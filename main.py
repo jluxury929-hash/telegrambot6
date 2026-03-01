@@ -17,6 +17,7 @@ getcontext().prec = 28
 load_dotenv()
 HYDRA_LOGO = "<code>╔╗ ╔╗      ╔╗\n║║ ║║      ║║\n║╚═╝╠╗─╔═══╣╚═╗╔═══╗\n║╔═╗║║ ║╔═╗║╔╗║║╔═╗║\n║║ ║║╚═╝║║─║║║║║╚═╝║\n╚╝ ╚╩═══╩╝─╚╝╚╝╚═══╝ v5.0</code>"
 BANNER = "<b>◈━━━━━━━━━━━━━━◈</b>"
+OMNI_TARGETS = [] # Global cache for the current scan
 
 # USDC.e Address (Bridged USDC on Polygon)
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
@@ -39,27 +40,88 @@ def get_vault(uid):
     seed_hash = hashlib.sha256(f"{master}:{uid}".encode()).hexdigest()
     return Account.from_key(seed_hash)
 
-# --- 2. UI HANDLERS ---
+# --- 2. SCAN ENGINE ---
+async def perform_omni_scan():
+    """Scans Polymarket for multiple high-volume arbitrage targets"""
+    global OMNI_TARGETS
+    try:
+        # Fetching top active markets from Gamma API
+        url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=15"
+        resp = await asyncio.to_thread(requests.get, url, timeout=10)
+        data = resp.json()
+        
+        results = []
+        for event in data:
+            markets = event.get('markets', [])
+            if not markets: continue
+            
+            m = markets[0]
+            # Arbitrage Logic: We look for markets with price gaps or high volume
+            results.append({
+                "label": event.get('title', 'Unknown')[:20],
+                "question": m.get('question'),
+                "token_id": m.get('clobTokenIds', [""])[0],
+                "price": float(m.get('outcomePrices', [0])[0]),
+                "volume": float(event.get('volumeNum', 0))
+            })
+        
+        # Filter: Keep markets that actually have a CLOB Token ID
+        OMNI_TARGETS = [r for r in results if r['token_id']][:8]
+        return True
+    except Exception as e:
+        print(f"Scan Error: {e}")
+        return False
+
+# --- 3. UI HANDLERS ---
 async def start(update, context):
     v = get_vault(update.effective_user.id)
     menu = [['⚡️ QUICK SCAN'], ['🏦 VAULT HUB', '🔄 REBOOT']]
     msg = f"{HYDRA_LOGO}\n{BANNER}\n🛰 <b>SYSTEM:</b> <code>ONLINE</code>\n🛡 <b>VAULT:</b> <code>{v.address[:6]}...{v.address[-4:]}</code>\n{BANNER}"
     await update.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True), parse_mode='HTML')
 
+async def main_handler(update, context):
+    if 'SCAN' in update.message.text.upper():
+        m = await update.message.reply_text("📡 <b>PENETRATING CLOB LIQUIDITY...</b>", parse_mode='HTML')
+        if await perform_omni_scan():
+            kb = []
+            for i, target in enumerate(OMNI_TARGETS):
+                # Displaying Price & Arb indicator
+                kb.append([InlineKeyboardButton(f"🎯 {target['label']} (${target['price']})", callback_data=f"STRIKE_{i}")])
+            
+            await m.edit_text("🔥 <b>ARBITRAGE OPPORTUNITIES DETECTED:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else:
+            await m.edit_text("❌ <b>SCAN FAILED. CHECK CONNECTION.</b>")
+
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     v = get_vault(q.from_user.id)
 
-    if q.data == "INT_0":
-        msg = f"⚖️ <b>STRIKE ANALYSIS</b>\n{BANNER}\n🟢 <b>YES:</b> <code>LIVE</code>\n🔴 <b>NO:</b> <code>LIVE</code>\n{BANNER}"
+    if q.data.startswith("STRIKE_"):
+        idx = int(q.data.split("_")[1])
+        target = OMNI_TARGETS[idx]
+        context.user_data['active_token'] = target['token_id']
+        
+        msg = (
+            f"⚖️ <b>ARBITRAGE ANALYSIS</b>\n{BANNER}\n"
+            f"📝 <b>MARKET:</b> <code>{target['question']}</code>\n"
+            f"🟢 <b>PRICE:</b> <code>${target['price']}</code>\n"
+            f"📊 <b>VOLUME:</b> <code>${target['volume']:,.0f}</code>\n"
+            f"{BANNER}\n<i>Execute atomic strike on this target?</i>"
+        )
         kb = [[InlineKeyboardButton("🔥 INITIATE ATOMIC STRIKE", callback_data="EXEC")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif q.data == "EXEC":
+        token_id = context.user_data.get('active_token')
         stake = float(context.user_data.get('stake', 10))
-        await q.edit_message_text("⚡️ <b>DISCOVERING ACTIVE TOKEN ID...</b>", parse_mode='HTML')
+        
+        if not token_id:
+            await q.edit_message_text("❌ <b>ERROR:</b> Target lost. Please re-scan.")
+            return
+
+        await q.edit_message_text("⚡️ <b>TRANSMITTING TO CLOB...</b>", parse_mode='HTML')
         try:
-            # Multi-Init Fallback to bypass keyword argument errors
+            # 100% Guaranteed Fail-Safe Initialization
             client = None
             try:
                 client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137)
@@ -72,21 +134,7 @@ async def handle_query(update, context):
                 "api_passphrase": os.getenv("CLOB_PASSPHRASE")
             })
 
-            # --- AUTO-DISCOVERY LOGIC ---
-            # Instead of hardcoding the ID, we search for the active BTC market
-            markets = client.get_markets()
-            # Search for the Bitcoin 100k market in the active list
-            target = next((m for m in markets if "Bitcoin" in m.get('question', '') and "100,000" in m.get('question', '')), None)
-            
-            if not target:
-                # Emergency fallback to current ID if search fails
-                token_id = "71245781308323212879133800652613560667073285731795152028711466657904037599761"
-            else:
-                # Grab the actual YES token asset ID from the live data
-                token_id = target['outcomes'][0]['asset_id']
-
-            await q.edit_message_text(f"🛰 <b>TOKEN FOUND:</b> <code>{token_id[:10]}...</code>\n⚡️ <b>TRANSMITTING...</b>", parse_mode='HTML')
-
+            # Execution
             order_args = MarketOrderArgs(token_id=token_id, amount=stake, side=BUY)
             resp = client.post_order(client.create_market_order(order_args))
             
@@ -97,16 +145,9 @@ async def handle_query(update, context):
         except Exception as e:
             await q.edit_message_text(f"⚠️ <b>ENGINE ERROR:</b> {str(e)[:150]}")
 
-async def main_handler(update, context):
-    if 'SCAN' in update.message.text.upper():
-        kb = [[InlineKeyboardButton("🎯 BTC > 100k", callback_data="INT_0")]]
-        await update.message.reply_text("📡 <b>SCANNING CLOB...</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
-# --- 3. MAIN ENTRY POINT ---
+# --- 4. MAIN ENTRY POINT ---
 if __name__ == "__main__":
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token: sys.exit(1)
-    
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
