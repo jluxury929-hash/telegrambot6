@@ -57,16 +57,13 @@ async def fetch_guaranteed_odds(market_json):
     try:
         p_raw = market_json.get('outcomePrices')
         c_raw = market_json.get('clobTokenIds')
-        
-        # Gamma API returns these as stringified JSON lists in some responses
         prices = json.loads(p_raw) if isinstance(p_raw, str) else p_raw
         clob_ids = json.loads(c_raw) if isinstance(c_raw, str) else c_raw
-        
         if prices and clob_ids and len(prices) >= 2:
             y_p = float(prices[0])
             n_p = float(prices[1])
-            # Zero-Gate: Ensure market is active
-            if y_p > 0.0001 and n_p > 0.0001:
+            # FILTER: Only include markets where Yes + No < 1.0 (Arbitrage Profit)
+            if y_p + n_p < 0.999 and y_p > 0.01 and n_p > 0.01:
                 return str(clob_ids[0]), y_p, str(clob_ids[1]), n_p
     except: pass
     return None
@@ -84,28 +81,28 @@ async def force_scour():
                 if res:
                     y_id, y_p, n_id, n_p = res
                     raw_results.append({
-                        "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, 
-                        "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
+                        "title": e.get('title')[:25], "y_tid": y_id, "y_pr": y_p, "n_tid": n_id, "n_pr": n_p, "vol": float(e.get('volumeNum', 0))
                     })
                     break 
         OMNI_STRIKE_CACHE = sorted(raw_results, key=lambda x: x['vol'], reverse=True)[:15]
-        return True
+        return len(OMNI_STRIKE_CACHE) > 0
     except: return False
 
 # --- 4. UI HANDLERS ---
 async def start(update, context):
     v = get_user_vault(update.effective_user.id, update.effective_user.username)
-    btns = [['🚀 SCAN ALL', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
-    await update.message.reply_text(f"<b>Hydra v440 Online</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [['🚀 SCAN ARB', '⚙️ CALIBRATE'], ['🏦 VAULT', '🔄 REFRESH']]
+    await update.message.reply_text(f"<b>Hydra v480 Profit-Lock</b>\nVault: <code>{v.address}</code>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'SCAN' in cmd or 'REFRESH' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING ALL OPTIONS...</b>")
+        m = await update.message.reply_text("📡 <b>SCANNING FOR PROFIT GAPS...</b>")
         if await force_scour():
-            kb = [[InlineKeyboardButton(f"⚖️ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
-            await m.edit_text("<b>ACTIVE BET OPTIONS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    
+            kb = [[InlineKeyboardButton(f"✅ {p['title']} ({p['y_pr']}/{p['n_pr']})", callback_data=f"INT_{i}")] for i, p in enumerate(OMNI_STRIKE_CACHE)]
+            await m.edit_text("<b>GUARANTEED ARB TARGETS:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else: await m.edit_text("❌ <b>NO PROFITABLE GAPS FOUND.</b>")
+
     elif 'VAULT' in cmd:
         v = get_user_vault(update.effective_user.id, update.effective_user.username)
         n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(v.address).call)
@@ -122,11 +119,9 @@ async def main_handler(update, context):
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     v = get_user_vault(q.from_user.id, q.from_user.username)
-    
     if "SET_" in q.data:
         val = int(q.data.split("_")[1]); context.user_data['payout'] = val
         await q.edit_message_text(f"✅ <b>STRIKE TARGET SET: ${val}</b>")
-    
     elif q.data == "CONVERT_NATIVE":
         m = await q.edit_message_text("📡 <b>CONVERTING...</b>", parse_mode='HTML')
         try:
@@ -136,34 +131,25 @@ async def handle_query(update, context):
             tx_hash = w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, v.key).raw_transaction)
             await m.edit_text(f"✅ <b>CONVERSION SENT</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>")
         except Exception as e: await m.edit_text(f"❌ <b>FAILED:</b> {str(e)[:50]}")
-
     elif "INT_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
-        payout = context.user_data.get('payout', 100)
-        
-        # LEGIT PROFIT MATH: Target * Price
-        s_yes = float(target['y_pr']) * float(payout)
-        s_no = float(target['n_pr']) * float(payout)
-        total_risk = s_yes + s_no
-        profit = float(payout) - total_risk
-        
+        payout = float(context.user_data.get('payout', 100))
+        # ARB MATH: Stake = Target * Price
+        s_yes, s_no = target['y_pr'] * payout, target['n_pr'] * payout
+        profit = payout - (s_yes + s_no)
         context.user_data['active_arb'] = {'idx': idx, 's_yes': s_yes, 's_no': s_no, 'profit': profit}
-        
-        desc = (f"⚖️ <b>LEGIT ARB ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
+        desc = (f"⚖️ <b>GUARANTEED PROFIT ANALYSIS</b>\n━━━━━━━━━━━━━━\n"
                 f"<b>YES Stake:</b> ${s_yes:.2f} @ {target['y_pr']}\n"
                 f"<b>NO Stake:</b> ${s_no:.2f} @ {target['n_pr']}\n"
-                f"<b>Total Risk:</b> ${total_risk:.2f}\n"
-                f"<b>Implied P/L:</b> {'+' if profit > 0 else ''}${profit:.2f}\n━━━━━━━━━━━━━━")
+                f"<b>Implied P/L: +${profit:.2f}</b>\n━━━━━━━━━━━━━━")
         await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("1️⃣ CONFIRM YES LEG", callback_data=f"STP1_{idx}")]]), parse_mode='HTML')
-
     elif "STP1_" in q.data:
         arb = context.user_data['active_arb']
         await q.edit_message_text(f"✅ <b>YES READY: ${arb['s_yes']:.2f}</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("2️⃣ CONFIRM NO LEG & EXE", callback_data=f"EXE_{arb['idx']}")]]), parse_mode='HTML')
-
     elif "EXE_" in q.data:
         idx = int(q.data.split("_")[1]); target = OMNI_STRIKE_CACHE[idx]
         arb = context.user_data['active_arb']
-        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>EXECUTING...</b>")
+        m_proc = await context.bot.send_message(q.message.chat_id, "👁️ <b>EXECUTING DUAL-LEG BROADCAST...</b>")
         try:
             client = ClobClient(host="https://clob.polymarket.com", key=v.key.hex(), chain_id=137, signature_type=0, funder=v.address)
             client.set_api_creds(client.create_or_derive_api_creds())
@@ -171,7 +157,7 @@ async def handle_query(update, context):
                 args = MarketOrderArgs(token_id=str(tid), amount=stake, side=BUY, price=0.999)
                 signed = await asyncio.to_thread(client.create_order, args)
                 await asyncio.to_thread(client.post_order, signed, OrderType.FOK)
-            await m_proc.edit_text("🚀 <b>STRIKE SUCCESSFUL.</b>")
+            await m_proc.edit_text("🚀 <b>STRIKE SUCCESSFUL. PROFIT LOCKED.</b>")
         except Exception as e: await m_proc.edit_text(f"⚠️ <b>ERROR:</b> {str(e)[:45]}")
 
 if __name__ == "__main__":
@@ -180,7 +166,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
-
 
 
 
