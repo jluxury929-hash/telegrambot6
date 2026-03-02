@@ -14,8 +14,7 @@ from py_clob_client.order_builder.constants import BUY
 # --- 1. CORE CONFIG ---
 getcontext().prec = 28
 load_dotenv()
-
-ARBI_CACHE = [] 
+ARBI_CACHE = []
 
 # SMART CONTRACT ADDRESSES
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
@@ -49,7 +48,6 @@ w3 = get_hydra_w3()
 if not w3:
     print("FATAL: RPC Failure."); import sys; sys.exit(1)
 
-# FIXED: Using Python Lists instead of JSON strings to prevent DecodeErrors
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
     {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"},
@@ -87,18 +85,14 @@ def init_clob():
 clob_client = init_clob()
 
 # --- 4. ARBITRAGE ENGINE ---
-
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
-
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
-    
-    expected_payout = (stake_yes / p_yes) 
+    expected_payout = (stake_yes / p_yes)
     profit = expected_payout - total_capital
     roi = (profit / total_capital) * 100
-
     return {
         "stake_yes": round(stake_yes, 2),
         "stake_no": round(stake_no, 2),
@@ -134,8 +128,7 @@ async def scour_arbitrage():
                             "title": e.get('title')[:30],
                             "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'],
                             "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'],
-                            "roi": arb['roi'],
-                            "eff": arb['eff']
+                            "roi": arb['roi'], "eff": arb['eff']
                         })
         except: continue
     ARBI_CACHE.sort(key=lambda x: x['eff'])
@@ -153,31 +146,28 @@ async def main_handler(update, context):
         if await scour_arbitrage():
             kb = [[InlineKeyboardButton(f"{'🟢' if a['roi'] > 0 else '🟡'} {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:8])]
             await m.edit_text("<b>OPPORTUNITIES FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
-
+        else:
+            await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(vault.address).call)
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e:</b> ${e_bal/1e6:.2f}", parse_mode='HTML')
-
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [50, 100, 250, 500, 1000]]]
+        # ADDED $5 OPTION BELOW
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 50, 100, 250, 500, 1000]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>\nSelect total liquidity for dual-leg arbitrage.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 50))
-
     if "SET_" in q.data:
         context.user_data['stake'] = int(q.data.split("_")[1])
         await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
-
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         msg = f"<b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
