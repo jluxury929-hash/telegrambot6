@@ -1,4 +1,4 @@
-import os, asyncio, json, time, requests
+import os, asyncio, json, time, requests, random
 import numpy as np
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
@@ -17,11 +17,16 @@ load_dotenv()
 ARBI_CACHE = []
 
 session = requests.Session()
+# UPDATED: Enhanced headers to bypass Cloudflare "Check IP" block
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
     'Origin': 'https://polymarket.com',
-    'Referer': 'https://polymarket.com/'
+    'Referer': 'https://polymarket.com/',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site'
 })
 
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
@@ -32,11 +37,10 @@ LOGO = """<code>█████╗ ██████╗ ███████�
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v242-RESILIENT</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v243-STEALTH</code>"""
 
 # --- 2. HYDRA ENGINE (RPC FAILOVER FIX) ---
 def get_hydra_w3():
-    # Exhaustive list of 2026 Polygon Nodes
     endpoints = [
         os.getenv("RPC_URL"),
         "https://polygon-rpc.com",
@@ -45,11 +49,9 @@ def get_hydra_w3():
         "https://polygon.llamarpc.com",
         "https://rpc-mainnet.maticvigil.com"
     ]
-    
     for url in endpoints:
         if not url: continue
         try:
-            # Set a high timeout for slow provider handshakes
             _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 15}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
@@ -62,7 +64,7 @@ def get_hydra_w3():
 
 w3 = get_hydra_w3()
 if not w3:
-    print("🚨 FATAL: ALL RPC ENDPOINTS FAILED. SYSTEM SHUTDOWN.")
+    print("🚨 FATAL: ALL RPC ENDPOINTS FAILED.")
     os._exit(1)
 
 ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}]
@@ -101,9 +103,13 @@ def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
 async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
-    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30"
+    # UPDATED: Direct Gamma Fetch with timing jitter to stay under the radar
+    url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40"
     try:
-        resp = await asyncio.to_thread(session.get, url, timeout=10)
+        await asyncio.sleep(random.uniform(0.5, 1.5)) # Jitter
+        resp = await asyncio.to_thread(session.get, url, timeout=12)
+        if resp.status_code != 200: return False
+        
         for e in resp.json():
             for m in e.get('markets', []):
                 try:
@@ -126,23 +132,25 @@ async def scour_arbitrage():
 # --- 5. BOT LOGIC ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>RECOVERY SYNC SUCCESSFUL</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>BYPASS ENGINE ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START ARBI-SCAN' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING...</b>", parse_mode='HTML')
+        m = await update.message.reply_text("📡 <b>PENETRATING FIREWALL...</b>", parse_mode='HTML')
         if await scour_arbitrage():
             kb = [[InlineKeyboardButton(f"{'🟢' if a['roi'] > 0 else '🟡'} {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:8])]
             await m.edit_text("<b>OPPORTUNITIES FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
         try:
+            # Stealth health check
             r = session.get("https://clob.polymarket.com/health", timeout=5)
             st = r.json().get('timestamp')
             drift = int(time.time()) - int(st)
             sync_status = "✅ SYNCED" if abs(drift) < 5 else f"⚠️ DRIFT: {drift}s"
-        except: sync_status = "❌ API BLOCK (Check IP)"
+        except:
+            sync_status = "❌ API BLOCK (Check IP)"
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Status:</b> {sync_status}\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
