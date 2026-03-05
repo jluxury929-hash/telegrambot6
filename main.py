@@ -62,8 +62,6 @@ vault = get_vault()
 
 def init_clob():
     try:
-        # If using email/magic, SIGNATURE_TYPE should be 1.
-        # If using direct private key with funds in that same address, use 0.
         sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
         client = ClobClient(
@@ -145,7 +143,7 @@ async def main_handler(update, context):
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # Added $5 option to the list
+        # Added $5 option
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
@@ -156,7 +154,6 @@ async def main_handler(update, context):
                 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
             })
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            # Universal fix for rawTransaction attribute name mismatch
             raw_tx = getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None))
             w3.eth.send_raw_transaction(raw_tx)
             await msg.edit_text("✅ <b>USDC APPROVED</b> for the CTF Exchange.")
@@ -181,14 +178,14 @@ async def handle_query(update, context):
         results = []
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # 'Price' here acts as a limit; 0.99 ensures we take any available order up to that price
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 signed_order = clob_client.create_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
+                # Print response for debugging the EXECUTION ERROR
+                print(f"Token {t_id} Response: {resp}")
                 if resp.get("success") or "order_id" in resp:
                     results.append(True)
                 else:
-                    print(f"API Error for token {t_id}: {resp}")
                     results.append(False)
             except Exception as e:
                 print(f"Execution Exception: {e}")
