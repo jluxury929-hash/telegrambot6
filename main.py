@@ -16,20 +16,18 @@ getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 
-# SMART CONTRACT ADDRESSES
+# ADDRESSES
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 UNISWAP_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
-LOGO = """
-<code>█████╗ ██████╗ ███████╗██╗   ██╗
+LOGO = """<code>█████╗ ██████╗ ███████╗██╗   ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
-███████║██████╔╝█████╗    ╚███╔╝ 
+███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
-██║  ██║██║      ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-FIXED-ABI</code>
-"""
+██║  ██║██║     ███████╗██╔╝ ██╗
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v229-FIXED</code>"""
 
 # --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
@@ -54,13 +52,7 @@ ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}], "name": "allowance", "outputs": [{"name": "remaining", "type": "uint256"}], "type": "function"}
 ]
 
-UNISWAP_ABI = [
-    {"inputs": [{"components": [{"internalType": "address", "name": "tokenIn", "type": "address"}, {"internalType": "address", "name": "tokenOut", "type": "address"}, {"internalType": "uint24", "name": "fee", "type": "uint24"}, {"internalType": "address", "name": "recipient", "type": "address"}, {"internalType": "uint256", "name": "deadline", "type": "uint256"}, {"internalType": "uint256", "name": "amountIn", "type": "uint256"}, {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"}, {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"}], "internalType": "struct ISwapRouter.ExactInputSingleParams", "name": "params", "type": "tuple"}], "name": "exactInputSingle", "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}], "stateMutability": "payable", "type": "function"}
-]
-
-usdc_n_contract = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-swap_router = w3.eth.contract(address=UNISWAP_ROUTER, abi=UNISWAP_ABI)
 
 # --- 3. VAULT & CLOB AUTH ---
 def get_vault():
@@ -88,8 +80,14 @@ clob_client = init_clob()
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
+    
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
+    
+    # Safety: Ensure neither leg is zero
+    if stake_yes < 0.01 or stake_no < 0.01:
+        return None
+
     expected_payout = (stake_yes / p_yes)
     profit = expected_payout - total_capital
     roi = (profit / total_capital) * 100
@@ -126,9 +124,12 @@ async def scour_arbitrage():
                     if arb:
                         ARBI_CACHE.append({
                             "title": e.get('title')[:30],
-                            "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'],
-                            "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'],
-                            "roi": arb['roi'], "eff": arb['eff']
+                            "yes_id": m_data['YES']['id'],
+                            "no_id": m_data['NO']['id'],
+                            "p_y": m_data['YES']['price'],
+                            "p_n": m_data['NO']['price'],
+                            "roi": arb['roi'],
+                            "eff": arb['eff']
                         })
         except: continue
     ARBI_CACHE.sort(key=lambda x: x['eff'])
@@ -152,35 +153,56 @@ async def main_handler(update, context):
         e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(vault.address).call)
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>USDC.e:</b> ${e_bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # ADDED $5 OPTION BELOW
+        # ADDED: $5 stake option
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 50, 100, 250, 500, 1000]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>\nSelect total liquidity for dual-leg arbitrage.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 50))
+    
     if "SET_" in q.data:
         context.user_data['stake'] = int(q.data.split("_")[1])
         await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
+        
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
+        if not calc:
+            await q.edit_message_text("❌ Error calculating stakes.")
+            return
         msg = f"<b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
-        for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
+        
+        # Trade legs
+        legs = [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]
+        
+        for (t_id, amt) in legs:
+            # SAFETY GUARD: Never allow 0 or tiny trades that break the API
+            if amt < 0.5: continue 
+            
             try:
-                order = MarketOrderArgs(token_id=str(t_id), amount=amt, side=BUY, price=0.99)
-                setattr(order, 'size', amt); setattr(order, 'expiration', 0)
-                signed = await asyncio.to_thread(clob_client.create_order, order)
-                resp = await asyncio.to_thread(clob_client.post_order, signed, OrderType.FOK)
+                # CLEANER EXECUTION: Standard MarketOrderArgs for py-clob-client
+                order = MarketOrderArgs(
+                    token_id=str(t_id),
+                    amount=float(amt),
+                    side=BUY
+                )
+                signed = clob_client.create_order(order)
+                resp = clob_client.post_order(signed, OrderType.FOK)
                 results.append(resp.get("success", False))
-            except: results.append(False)
-        await context.bot.send_message(q.message.chat_id, "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>", parse_mode='HTML')
+            except Exception as e:
+                print(f"Trade Error on {t_id}: {e}")
+                results.append(False)
+        
+        final_status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) and len(results) > 0 else "⚠️ <b>EXECUTION ERROR</b>"
+        await context.bot.send_message(q.message.chat_id, final_status, parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
