@@ -30,8 +30,7 @@ LOGO = """
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v232-PRO
-    [ ARCHITECT: OMNISCIENT ]
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v235-FINAL
 </code>
 """
 
@@ -85,14 +84,16 @@ clob_client = init_clob()
 
 # --- 3. THE PRICE & ARBI CORE ---
 async def get_safe_price(token_id):
-    """Fetches real-time price + slippage to satisfy 0.01-0.99 API requirement."""
+    """Walks the book 3 levels deep to prevent Partial Fills."""
     try:
         url = f"https://clob.polymarket.com/book?token_id={token_id}"
         r = await asyncio.to_thread(requests.get, url, timeout=5)
         data = r.json()
         if data.get('asks'):
-            best_ask = float(data['asks'][0]['price'])
-            return min(0.99, round(best_ask * 1.02, 2))
+            # Fetch 3rd level price to ensure liquidity for the full stake
+            depth = min(len(data['asks']) - 1, 2)
+            deep_price = float(data['asks'][depth]['price'])
+            return min(0.99, round(deep_price + 0.01, 2))
     except: pass
     return 0.99
 
@@ -140,28 +141,25 @@ async def start(update, context):
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START ARBI-SCAN' in cmd:
-        m = await update.message.reply_text("📡 <b>SCANNING MATRIX...</b>", parse_mode='HTML')
+        m = await update.message.reply_text("📡 <b>SCANNING...</b>", parse_mode='HTML')
         if await scour_arbitrage():
             kb = [[InlineKeyboardButton(f"🎯 {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:8])]
             await m.edit_text("<b>OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("🛰 <b>EMPTY GRID.</b>")
-    
     elif 'VAULT' in cmd:
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
         bal = usdc_e_contract.functions.balanceOf(funder).call()
-        await update.message.reply_text(f"<b>VAULT</b>\n<code>{funder}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT</b>\n<code>{funder}</code>\n<b>USDC:</b> ${bal/1e6:.2f}", parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 10))
-    
     if "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         msg = f"<b>{target['title']}</b>\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
@@ -169,13 +167,25 @@ async def handle_query(update, context):
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
                 price_limit = await get_safe_price(t_id)
-                # THE FIX: Ensuring 'amount' is used and price is non-zero
-                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side=BUY, price=price_limit)
-                signed = clob_client.create_order(order_args)
+                
+                # --- [THE ULTIMATE FIX APPLIED] ---
+                order_args = MarketOrderArgs(
+                    token_id=str(t_id), 
+                    amount=float(amt), 
+                    side=BUY, 
+                    price=price_limit
+                )
+                
+                # Manual injection to satisfy both 'amount' and 'size' attribute lookups in SDK
+                if not hasattr(order_args, 'size'):
+                    setattr(order_args, 'size', float(amt))
+
+                # Use dedicated market order method
+                signed = clob_client.create_market_order(order_args)
                 resp = clob_client.post_order(signed, OrderType.FOK)
                 results.append(True if (resp.get("success") or "order_id" in resp) else False)
             except Exception as e:
-                await context.bot.send_message(q.message.chat_id, f"❌ <b>SDK Error:</b> {str(e)}")
+                await context.bot.send_message(q.message.chat_id, f"❌ <b>Execution Error:</b> {str(e)}")
                 results.append(False)
         await context.bot.send_message(q.message.chat_id, "✅ <b>STRIKE COMPLETE</b>" if all(results) else "⚠️ <b>PARTIAL FILL / REVERT</b>", parse_mode='HTML')
 
