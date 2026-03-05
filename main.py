@@ -19,12 +19,12 @@ ARBI_CACHE = []
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
-LOGO = """<code>█████╗ ██████╗ ███████╗██╗   ██╗ 
-██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝ 
-███████║██████╔╝█████╗   ╚███╔╝  
+LOGO = """<code>█████╗ ██████╗ ███████╗██╗   ██╗
+██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
+███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
-██║  ██║██║     ███████╗██╔╝ ██╗ 
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-FIXED</code>"""
+██║  ██║██║     ███████╗██╔╝ ██╗
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v237-STABLE</code>"""
 
 # --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
@@ -52,14 +52,15 @@ usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
-    try: return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
+    try:
+        return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
     except: return None
 
 vault = get_vault()
 
 def init_clob():
     try:
-        # FIX: Changed default to 0 for standard private keys to prevent 'invalid signature'
+        # SIGNATURE FIX: Use 0 for standard private keys (fixes 400 Invalid Signature)
         sig_type = int(os.getenv("SIGNATURE_TYPE", 0)) 
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
         client = ClobClient(
@@ -77,7 +78,7 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. ARBITRAGE MATH (PRESERVED) ---
+# --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
@@ -116,7 +117,7 @@ async def scour_arbitrage():
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
                         ARBI_CACHE.append({
-                            "title": e.get('title')[:30], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'],
+                            "title": e.get('title')[:30], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'], 
                             "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'], "roi": arb['roi'], "eff": arb['eff']
                         })
         except: continue
@@ -138,20 +139,21 @@ async def main_handler(update, context):
         else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
-        await update.message.reply_text("🎯 <b>STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
         try:
+            msg = await update.message.reply_text("⌛ <b>SENDING APPROVAL...</b>", parse_mode='HTML')
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
                 'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address),
                 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
             })
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            w3.eth.send_raw_transaction(signed.rawTransaction)
-            await update.message.reply_text("✅ <b>USDC APPROVED</b>")
-        except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
+            w3.eth.send_raw_transaction(signed.raw_transaction)
+            await msg.edit_text("✅ <b>USDC APPROVED</b>")
+        except Exception as e: await update.message.reply_text(f"❌ <b>FAILED</b>: {e}")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -162,23 +164,29 @@ async def handle_query(update, context):
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        msg = f"<b>PLAN:</b> {target['title']}\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
+        msg = f"<b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
-        for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
+        for (t_id, amt, price) in [(target['yes_id'], calc['stake_yes'], target['p_y']), (target['no_id'], calc['stake_no'], target['p_n'])]:
             try:
-                # FIX: Using create_market_order handles EIP-712 hashing correctly for market orders
-                order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side=BUY)
+                # BUFFERS: Ensure order price clears the book level
+                adj_price = round(price * 1.02, 2)
+                order = MarketOrderArgs(token_id=str(t_id), amount=float(round(amt, 2)), side=BUY, price=float(adj_price))
+                
+                # HEAL: Satisfy internal attribute lookup for 'size'
+                if not hasattr(order, 'size'): setattr(order, 'size', float(round(amt, 2)))
+                
+                # SIGNATURE FIX: Use create_market_order for correct EIP-712 hashing
                 signed_order = clob_client.create_market_order(order)
-                resp = clob_client.post_order(signed_order)
+                resp = clob_client.post_order(signed_order, OrderType.FOK)
                 results.append(True if (resp.get("success") or "order_id" in resp) else False)
             except Exception as e:
-                print(f"Execution Error: {e}"); results.append(False)
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>"
+                print(f"Exception: {e}"); results.append(False)
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console/system time."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
@@ -186,12 +194,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+    print("Hydra Bot Active.")
     app.run_polling()
-
-
-
-
-
 
 
 
