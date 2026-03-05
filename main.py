@@ -62,13 +62,17 @@ vault = get_vault()
 
 def init_clob():
     try:
-        sig_type = int(os.getenv("SIGNATURE_TYPE", 0))
+        # If using email/magic, SIGNATURE_TYPE should be 1. 
+        # If using direct private key with funds in that same address, use 0.
+        sig_type = int(os.getenv("SIGNATURE_TYPE", 1)) 
+        funder = os.getenv("FUNDER_ADDRESS", vault.address)
+        
         client = ClobClient(
             host="https://clob.polymarket.com", 
             key=vault.key.hex(), 
             chain_id=137, 
             signature_type=sig_type, 
-            funder=vault.address
+            funder=funder
         )
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
@@ -153,7 +157,7 @@ async def main_handler(update, context):
             
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Address:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
         
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250, 500]]]
@@ -161,17 +165,21 @@ async def main_handler(update, context):
 
     elif 'FIX APPROVAL' in cmd:
         try:
-            msg = await update.message.reply_text("⌛ Sending approval...")
+            msg = await update.message.reply_text("⌛ <b>SENDING APPROVAL...</b>", parse_mode='HTML')
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
                 'from': vault.address,
                 'nonce': w3.eth.get_transaction_count(vault.address),
-                'gasPrice': w3.eth.gas_price
+                'gasPrice': int(w3.eth.gas_price * 1.2),
+                'chainId': 137
             })
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            w3.eth.send_raw_transaction(signed.rawTransaction)
-            await msg.edit_text("✅ <b>USDC APPROVED</b> for CTF Exchange.")
+            
+            # Universal fix for rawTransaction attribute name mismatch
+            raw_tx = getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None))
+            w3.eth.send_raw_transaction(raw_tx)
+            await msg.edit_text("✅ <b>USDC APPROVED</b> for the CTF Exchange.")
         except Exception as e:
-            await update.message.reply_text(f"❌ Approval failed: {e}")
+            await update.message.reply_text(f"❌ <b>APPROVAL FAILED</b>: {e}", parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -195,7 +203,7 @@ async def handle_query(update, context):
         
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # We use 0.99 as a price cap to ensure the market order fills immediately
+                # 'Price' here acts as a limit; 0.99 ensures we take any available order up to that price
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 signed_order = clob_client.create_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
@@ -203,10 +211,10 @@ async def handle_query(update, context):
                 if resp.get("success") or "order_id" in resp:
                     results.append(True)
                 else:
-                    print(f"API Error: {resp}") # Log error to terminal
+                    print(f"API Error for token {t_id}: {resp}")
                     results.append(False)
             except Exception as e:
-                print(f"Exec Error: {e}")
+                print(f"Execution Exception: {e}")
                 results.append(False)
 
         status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for API details."
@@ -217,7 +225,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Active...")
+    print("Hydra Bot Active. Monitoring for Arbitrage...")
     app.run_polling()
 
 
