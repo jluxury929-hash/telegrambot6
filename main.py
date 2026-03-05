@@ -50,7 +50,7 @@ ERC20_ABI = [
 ]
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
-# --- 3. VAULT & CLOB AUTH ---
+# --- 3. VAULT & CLOB AUTH (INTEGRATED AUTO-DERIVATION) ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -61,17 +61,27 @@ def get_vault():
 vault = get_vault()
 
 def init_clob():
+    """Applies the SDK fix: Uses L1 Auth to derive L2 API credentials automatically"""
     try:
         sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
+        
+        # Initialize client with L1 Private Key
         client = ClobClient(
             host="https://clob.polymarket.com", 
             key=vault.key.hex(), 
             chain_id=137, 
             signature_type=sig_type, 
-            funder=funder
+            funder=Web3.to_checksum_address(funder)
         )
-        client.set_api_creds(client.create_or_derive_api_creds())
+        
+        # THE FIX: This replaces the manual API Key entry. 
+        # It signs an L1 message to fetch your L2 credentials.
+        print("Hydra: Deriving L2 API Credentials...")
+        creds = client.create_or_derive_api_creds()
+        client.set_api_creds(creds)
+        
+        print("Hydra: Authentication Secured.")
         return client
     except Exception as e:
         print(f"Auth derivation failed: {e}")
@@ -127,8 +137,9 @@ async def scour_arbitrage():
 
 # --- 5. BOT LOGIC ---
 async def start(update, context):
+    status = "🟢 SYSTEM READY" if clob_client else "🔴 AUTH ERROR"
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>{status}</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
@@ -140,8 +151,9 @@ async def main_handler(update, context):
         else:
             await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
-        bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        funder = os.getenv("FUNDER_ADDRESS", vault.address)
+        bal = usdc_e_contract.functions.balanceOf(funder).call()
+        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>Proxy/Funder:</b> <code>{funder}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -153,8 +165,7 @@ async def main_handler(update, context):
                 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
             })
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            raw_tx = getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None))
-            w3.eth.send_raw_transaction(raw_tx)
+            w3.eth.send_raw_transaction(signed.raw_transaction)
             await msg.edit_text("✅ <b>USDC APPROVED</b> for the CTF Exchange.")
         except Exception as e:
             await update.message.reply_text(f"❌ <b>APPROVAL FAILED</b>: {e}", parse_mode='HTML')
@@ -175,35 +186,36 @@ async def handle_query(update, context):
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
-        for (t_id, amt, price) in [(target['yes_id'], calc['stake_yes'], target['p_y']), (target['no_id'], calc['stake_no'], target['p_n'])]:
+        
+        for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # Slippage tolerance @ 5%
-                adj_price = round(price * 1.05, 2)
+                # SDK uses L2 credentials derived at start to sign this buy order
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 signed_order = clob_client.create_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
                 
-                # DIAGNOSTIC: This will show you exactly why Polymarket said NO.
                 if resp.get("success") or "order_id" in resp:
                     results.append(True)
                 else:
-                    print(f"--- POLYMARKET REJECTED ---")
-                    print(f"Token: {t_id} | Response: {resp}")
+                    print(f"Post-order Error: {resp}")
                     results.append(False)
             except Exception as e:
-                print(f"--- SYSTEM CRASH ---")
-                print(f"Error: {e}")
+                print(f"Execution Exception: {e}")
                 results.append(False)
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for API details."
+        
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nVerify USDC.e balance or Funder Address."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_query))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot Active. Monitoring for Arbitrage...")
-    app.run_polling()
+    if not clob_client:
+        print("Bot failed to initialize. Check your WALLET_SEED and FUNDER_ADDRESS.")
+    else:
+        app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(handle_query))
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+        print("Hydra Bot Active. Authentication derived.")
+        app.run_polling()
 
 
 
