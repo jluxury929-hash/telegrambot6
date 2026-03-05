@@ -10,26 +10,29 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 # Polymarket SDK Imports
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs
+from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-# --- 1. CORE CONFIG & VPN FIX ---
+# --- 1. CORE CONFIG & AUTO-VPN ---
 getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 
-def connect_vpn():
-    """Fixes the 403 Geoblock error by connecting to VPN on start"""
-    print("🌐 [SHIELD] Bypassing Geoblock via Windscribe...")
+def auto_vpn():
+    """Bypasses Geoblock automatically on start"""
+    print("🛡 [GHOST] Initializing VPN Tunnel...")
     try:
-        subprocess.run(["windscribe-cli", "connect", "best"], capture_output=True)
-        time.sleep(5)
+        subprocess.run(["windscribe-cli", "connect", "best"], check=True, capture_output=True)
+        time.sleep(6)
+        ip = requests.get('https://api.ipify.org', timeout=10).text
+        print(f"🛡 [GHOST] VPN Active. Node IP: {ip}")
     except:
-        print("⚠️ VPN failed. Ensure windscribe-cli is installed for trading.")
+        print("⚠️ VPN Auto-Connect failed. Ensure windscribe-cli is installed.")
 
-connect_vpn()
+auto_vpn()
 atexit.register(lambda: subprocess.run(["windscribe-cli", "disconnect"], capture_output=True))
 
+# ADDRESSES
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 LOGO = """<code>█████╗ ██████╗ ███████╗██╗   ██╗
@@ -37,9 +40,9 @@ LOGO = """<code>█████╗ ██████╗ ███████�
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v238-SHIELD</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v239-GHOST-STABLE</code>"""
 
-# --- 2. HYDRA ENGINE ---
+# --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
     endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in endpoints:
@@ -73,7 +76,7 @@ vault = get_vault()
 
 def init_clob():
     try:
-        sig_type = int(os.getenv("SIGNATURE_TYPE", 0))
+        sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
         client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=funder)
         client.set_api_creds(client.create_or_derive_api_creds())
@@ -86,7 +89,7 @@ clob_client = init_clob()
 # --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
-    if combined_prob <= 0 or combined_prob >= 1.0: return None
+    if combined_prob <= 0 or combined_prob >= 0.999: return None
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
     if stake_yes < 1.0 or stake_no < 1.0: return None
@@ -127,7 +130,7 @@ async def scour_arbitrage():
     ARBI_CACHE.sort(key=lambda x: x['eff'])
     return len(ARBI_CACHE) > 0
 
-# --- 5. BOT LOGIC ---
+# --- 5. BOT LOGIC (Buttons & Handlers) ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
     await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
@@ -147,6 +150,18 @@ async def main_handler(update, context):
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    elif 'FIX APPROVAL' in cmd:
+        try:
+            msg = await update.message.reply_text("⌛ <b>SENDING APPROVAL...</b>", parse_mode='HTML')
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
+                'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address),
+                'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
+            })
+            signed = w3.eth.account.sign_transaction(tx, vault.key)
+            raw_tx = getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None))
+            w3.eth.send_raw_transaction(raw_tx)
+            await msg.edit_text("✅ <b>USDC APPROVED</b>")
+        except Exception as e: await update.message.reply_text(f"❌ <b>FAILED</b>: {e}")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -155,8 +170,7 @@ async def handle_query(update, context):
         context.user_data['stake'] = int(q.data.split("_")[1])
         await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
     elif "ARB_" in q.data:
-        idx = int(q.data.split("_")[1])
-        target = ARBI_CACHE[idx]
+        idx = int(q.data.split("_")[1]); target = ARBI_CACHE[idx]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         msg = f"<b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{idx}")]]
@@ -165,31 +179,40 @@ async def handle_query(update, context):
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
-        for tid, amt in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
+        for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                order = clob_client.create_order(OrderArgs(price=0.99, size=float(amt), side=BUY, token_id=str(tid)))
-                resp = clob_client.post_order(order)
-                results.append(True if (resp.get("success") or "orderID" in str(resp)) else False)
-            except Exception as e:
-                print(f"Trade Error: {e}")
-                results.append(False)
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console logs."
-        await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
+                order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
+                signed_order = clob_client.create_order(order)
+                resp = clob_client.post_order(signed_order, OrderType.FOK)
+                results.append(True if (resp.get("success") or "order_id" in resp) else False)
+            except: results.append(False)
+        await context.bot.send_message(q.message.chat_id, "✅ <b>SECURED</b>" if all(results) else "⚠️ <b>ERROR</b>")
 
-# --- 6. CRITICAL FIXES ---
-async def error_handler(update, context):
-    """Mutes the 'No error handlers registered' log spam"""
-    print(f"Log Intercepted: {context.error}")
+# --- 6. GHOST PILOT (Automation Task) ---
+async def ghost_pilot(app):
+    print("🕵️ [GHOST] Autonomous loop active.")
+    while True:
+        try:
+            if await scour_arbitrage():
+                for arb in ARBI_CACHE:
+                    if arb['roi'] >= 0.7: # Trigger auto-trade if ROI > 0.7%
+                        print(f"🔥 [GHOST] Trading: {arb['title']}")
+                        for tid, amt in [(arb['yes_id'], (arb['p_n']/(arb['p_y']+arb['p_n']))*50.0), (arb['no_id'], (arb['p_y']/(arb['p_y']+arb['p_n']))*50.0)]:
+                            clob_client.post_order(clob_client.create_order(MarketOrderArgs(token_id=str(tid), amount=float(amt), side="BUY")), OrderType.FOK)
+                        await app.bot.send_message(os.getenv("TELEGRAM_CHAT_ID"), f"🤖 <b>AUTO-GHOST EXECUTION</b>\n{arb['title']}\nROI: {arb['roi']}%", parse_mode='HTML')
+            await asyncio.sleep(45)
+        except: await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    # KILL CONFLICT: Prevents 'Conflict: terminated by other getUpdates request'
-    print("🧹 [SHIELD] Clearing old instances...")
-    
+    print("🧹 [SHIELD] Clearing old bot instances...")
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    app.add_error_handler(error_handler)
+    
+    loop = asyncio.get_event_loop()
+    loop.create_task(ghost_pilot(app))
     
     print("Hydra Bot Active. Monitoring for Arbitrage...")
-    app.run_polling(drop_pending_updates=True) # Clears backlog to prevent immediate conflict crash
+    app.run_polling(drop_pending_updates=True)
+
