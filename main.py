@@ -23,10 +23,10 @@ def auto_vpn():
     print("🛡 [GHOST] Engaging secure tunnel...")
     try:
         subprocess.run(["windscribe-cli", "connect", "best"], check=True, capture_output=True)
-        time.sleep(6) # Stabilization
+        time.sleep(6)
         print("🛡 [GHOST] VPN Linked Successfully.")
     except:
-        print("⚠️ VPN Failure. Ensure windscribe-cli is installed/logged in.")
+        print("⚠️ VPN Failure. Manual connection required.")
 
 auto_vpn()
 atexit.register(lambda: subprocess.run(["windscribe-cli", "disconnect"], capture_output=True))
@@ -38,7 +38,7 @@ LOGO = """<code>█████╗ ██████╗ ███████�
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v240-ULTRA</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v241-FIXED</code>"""
 
 # --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
@@ -87,11 +87,9 @@ clob_client = init_clob()
 # --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
-    # Loosened thresholds to ensure more bets appear
     if combined_prob <= 0 or combined_prob >= 1.05: return None
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
-    if stake_yes < 0.5 or stake_no < 0.5: return None
     profit = (stake_yes / p_yes) - total_capital
     return {
         "stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2),
@@ -109,8 +107,7 @@ async def fetch_full_market(cond_id):
 async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
-    # Broadened tags to include more markets
-    tags = [1, 10, 100, 4, 6, 237, 112, 11, 22] 
+    tags = [1, 10, 100, 4, 6, 237, 112, 11] 
     for tag in tags:
         url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=20&tag_id={tag}"
         try:
@@ -130,7 +127,7 @@ async def scour_arbitrage():
     ARBI_CACHE.sort(key=lambda x: x['eff'])
     return len(ARBI_CACHE) > 0
 
-# --- 5. BOT LOGIC ---
+# --- 5. BOT LOGIC (FIXED HANDLERS) ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
     await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
@@ -148,18 +145,28 @@ async def main_handler(update, context):
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
+        # FIXED: Ensure callback_data matches the handle_query logic
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
-    q = update.callback_query; await q.answer()
+    q = update.callback_query
+    await q.answer()
     stake = float(context.user_data.get('stake', 50))
-    if "ARB_" in q.data:
-        target = ARBI_CACHE[int(q.data.split("_")[1])]
+    
+    if "SET_" in q.data:
+        val = q.data.split("_")[1]
+        context.user_data['stake'] = int(val)
+        await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${val}</b>")
+        
+    elif "ARB_" in q.data:
+        idx = int(q.data.split("_")[1])
+        target = ARBI_CACHE[idx]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         msg = f"<b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
-        kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
+        kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{idx}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
@@ -168,25 +175,30 @@ async def handle_query(update, context):
             try:
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 resp = clob_client.post_order(clob_client.create_order(order), OrderType.FOK)
-                results.append(True if (resp.get("success") or "order_id" in resp) else False)
-            except: results.append(False)
-        await context.bot.send_message(q.message.chat_id, "✅ <b>SECURED</b>" if all(results) else "⚠️ <b>ERROR</b>")
+                if resp.get("success") or "order_id" in resp:
+                    results.append(True)
+                else:
+                    print(f"FAILED: {resp}") # Log full API error
+                    results.append(False)
+            except Exception as e:
+                print(f"Exception: {e}")
+                results.append(False)
+        
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>BET FAILED</b>\nCheck console for Geoblock or Funds error."
+        await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
-# --- 6. AUTONOMOUS GHOST PILOT ---
+# --- 6. GHOST PILOT (Automation) ---
 async def ghost_pilot(app):
-    """Guarantees bets by scanning and executing 24/7 in background"""
-    print("🕵️ [GHOST] Pilot scanning for targets...")
     while True:
         try:
             if await scour_arbitrage():
                 for arb in ARBI_CACHE:
-                    if arb['roi'] > 0.5: # Auto-trade threshold
-                        # Execute $50 trade automatically
+                    if arb['roi'] > 0.8:
                         for tid, amt in [(arb['yes_id'], (arb['p_n']/(arb['p_y']+arb['p_n']))*50.0), (arb['no_id'], (arb['p_y']/(arb['p_y']+arb['p_n']))*50.0)]:
                             clob_client.post_order(clob_client.create_order(MarketOrderArgs(token_id=str(tid), amount=float(amt), side="BUY")), OrderType.FOK)
-                        await app.bot.send_message(os.getenv("TELEGRAM_CHAT_ID"), f"🤖 <b>AUTO-STRIKE SUCCESS</b>\n{arb['title']}\nROI: {arb['roi']}%", parse_mode='HTML')
-            await asyncio.sleep(40)
-        except: await asyncio.sleep(10)
+                        await app.bot.send_message(os.getenv("TELEGRAM_CHAT_ID"), f"🤖 <b>AUTO-STRIKE:</b> {arb['title']} ({arb['roi']}%)", parse_mode='HTML')
+            await asyncio.sleep(45)
+        except: await asyncio.sleep(15)
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
@@ -194,10 +206,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     
-    # Start the background pilot
     asyncio.get_event_loop().create_task(ghost_pilot(app))
-    
-    print("Hydra Bot Active. VPN and Ghost Pilot Engaged.")
+    print("Hydra Bot Active.")
     app.run_polling(drop_pending_updates=True)
+
 
 
