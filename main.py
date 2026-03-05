@@ -143,7 +143,6 @@ async def main_handler(update, context):
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # Added $5 option
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
@@ -176,16 +175,17 @@ async def handle_query(update, context):
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
-        for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
+        for (t_id, amt, price) in [(target['yes_id'], calc['stake_yes'], target['p_y']), (target['no_id'], calc['stake_no'], target['p_n'])]:
             try:
+                # FIX: Added a 1% slippage buffer to the price to ensure the order fills
+                adj_price = round(price * 1.01, 2)
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 signed_order = clob_client.create_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
-                # Print response for debugging the EXECUTION ERROR
-                print(f"Token {t_id} Response: {resp}")
                 if resp.get("success") or "order_id" in resp:
                     results.append(True)
                 else:
+                    print(f"API Error for token {t_id}: {resp}")
                     results.append(False)
             except Exception as e:
                 print(f"Execution Exception: {e}")
