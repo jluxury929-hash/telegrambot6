@@ -11,15 +11,14 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-# --- 1. CORE CONFIG ---
+# --- 1. CORE CONFIG & STEALTH ---
 getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 
-# STEALTH SESSION: Mimics Chrome/Mac handshake to bypass IP blocks
 session = requests.Session()
 session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
     'Origin': 'https://polymarket.com',
     'Referer': 'https://polymarket.com/'
@@ -33,23 +32,38 @@ LOGO = """<code>█████╗ ██████╗ ███████�
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v241-STEALTH</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v242-RESILIENT</code>"""
 
-# --- 2. HYDRA ENGINE & ABIs ---
+# --- 2. HYDRA ENGINE (RPC FAILOVER FIX) ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com"]
+    # Exhaustive list of 2026 Polygon Nodes
+    endpoints = [
+        os.getenv("RPC_URL"),
+        "https://polygon-rpc.com",
+        "https://rpc.ankr.com/polygon",
+        "https://1rpc.io/matic",
+        "https://polygon.llamarpc.com",
+        "https://rpc-mainnet.maticvigil.com"
+    ]
+    
     for url in endpoints:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            # Set a high timeout for slow provider handshakes
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 15}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                print(f"✅ RPC CONNECTED: {url}")
                 return _w3
-        except: continue
+        except:
+            print(f"⚠️ RPC FAILED: {url}")
+            continue
     return None
 
 w3 = get_hydra_w3()
-if not w3: exit("FATAL: RPC Failure.")
+if not w3:
+    print("🚨 FATAL: ALL RPC ENDPOINTS FAILED. SYSTEM SHUTDOWN.")
+    os._exit(1)
 
 ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}]
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
@@ -81,14 +95,12 @@ def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     if combined_prob <= 0 or combined_prob >= 0.999: return None
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
-    if stake_yes < 1.0 or stake_no < 1.0: return None
     profit = (stake_yes / p_yes) - total_capital
     return {"stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2), "roi": round((profit / total_capital) * 100, 2), "eff": round(combined_prob, 4)}
 
 async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
-    # Using Gamma API directly for prices to stay under the firewall radar
     url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30"
     try:
         resp = await asyncio.to_thread(session.get, url, timeout=10)
@@ -108,13 +120,13 @@ async def scour_arbitrage():
                             })
                 except: continue
     except: return False
-    ARBI_CACHE.sort(key=lambda x: x['eff'])
+    ARBI_CACHE.sort(key=lambda x: x['roi'], reverse=True)
     return len(ARBI_CACHE) > 0
 
 # --- 5. BOT LOGIC ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA STEALTH ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>RECOVERY SYNC SUCCESSFUL</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
