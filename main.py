@@ -62,17 +62,13 @@ vault = get_vault()
 
 def init_clob():
     try:
-        # If using email/magic, SIGNATURE_TYPE should be 1. 
-        # If using direct private key with funds in that same address, use 0.
-        sig_type = int(os.getenv("SIGNATURE_TYPE", 1)) 
-        funder = os.getenv("FUNDER_ADDRESS", vault.address)
-        
+        # Minimal: Forced Type 0 for EOA
         client = ClobClient(
             host="https://clob.polymarket.com", 
             key=vault.key.hex(), 
             chain_id=137, 
-            signature_type=sig_type, 
-            funder=funder
+            signature_type=0, 
+            funder=vault.address
         )
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
@@ -86,22 +82,15 @@ clob_client = init_clob()
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
-    
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
-    
     if stake_yes < 1.0 or stake_no < 1.0: return None
-    
     expected_payout = (stake_yes / p_yes)
     profit = expected_payout - total_capital
     roi = (profit / total_capital) * 100
-    
     return {
-        "stake_yes": round(stake_yes, 2),
-        "stake_no": round(stake_no, 2),
-        "profit": round(profit, 2),
-        "roi": round(roi, 2),
-        "eff": round(combined_prob, 4)
+        "stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2),
+        "profit": round(profit, 2), "roi": round(roi, 2), "eff": round(combined_prob, 4)
     }
 
 async def fetch_full_market(cond_id):
@@ -128,13 +117,8 @@ async def scour_arbitrage():
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
                         ARBI_CACHE.append({
-                            "title": e.get('title')[:30],
-                            "yes_id": m_data['YES']['id'],
-                            "no_id": m_data['NO']['id'],
-                            "p_y": m_data['YES']['price'],
-                            "p_n": m_data['NO']['price'],
-                            "roi": arb['roi'],
-                            "eff": arb['eff']
+                            "title": e.get('title')[:30], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'],
+                            "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'], "roi": arb['roi'], "eff": arb['eff']
                         })
         except: continue
     ARBI_CACHE.sort(key=lambda x: x['eff'])
@@ -142,7 +126,7 @@ async def scour_arbitrage():
 
 # --- 5. BOT LOGIC ---
 async def start(update, context):
-    btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
+    btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 APPROVE CONTRACT']]
     await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
@@ -152,72 +136,55 @@ async def main_handler(update, context):
         if await scour_arbitrage():
             kb = [[InlineKeyboardButton(f"{'🟢' if a['roi'] > 0 else '🟡'} {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:8])]
             await m.edit_text("<b>OPPORTUNITIES FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else:
-            await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
-            
+        else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
-        
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250, 500]]]
+        # Minimal Change: Added $5
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
-    elif 'FIX APPROVAL' in cmd:
+    elif 'APPROVE CONTRACT' in cmd:
         try:
             msg = await update.message.reply_text("⌛ <b>SENDING APPROVAL...</b>", parse_mode='HTML')
+            # Keeping your original logic exactly as requested
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
-                'from': vault.address,
-                'nonce': w3.eth.get_transaction_count(vault.address),
-                'gasPrice': int(w3.eth.gas_price * 1.2),
-                'chainId': 137
+                'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address),
+                'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
             })
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            
-            # Universal fix for rawTransaction attribute name mismatch
             raw_tx = getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None))
             w3.eth.send_raw_transaction(raw_tx)
             await msg.edit_text("✅ <b>USDC APPROVED</b> for the CTF Exchange.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ <b>APPROVAL FAILED</b>: {e}", parse_mode='HTML')
+        except Exception as e: await update.message.reply_text(f"❌ <b>APPROVAL FAILED</b>: {e}", parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 50))
-    
     if "SET_" in q.data:
         context.user_data['stake'] = int(q.data.split("_")[1])
         await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
-        
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
+        if not calc:
+             await q.edit_message_text("❌ <b>STAKE TOO LOW</b> (Min $1/leg).")
+             return
         msg = f"<b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
-        
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # 'Price' here acts as a limit; 0.99 ensures we take any available order up to that price
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 signed_order = clob_client.create_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
-                
-                if resp.get("success") or "order_id" in resp:
-                    results.append(True)
-                else:
-                    print(f"API Error for token {t_id}: {resp}")
-                    results.append(False)
-            except Exception as e:
-                print(f"Execution Exception: {e}")
-                results.append(False)
-
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for API details."
+                results.append(True if (resp.get("success") or "order_id" in resp) else False)
+            except: results.append(False)
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) and len(results) == 2 else "⚠️ <b>EXECUTION ERROR</b>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
@@ -225,7 +192,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot Active. Monitoring for Arbitrage...")
     app.run_polling()
 
 
