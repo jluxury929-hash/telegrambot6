@@ -60,7 +60,6 @@ vault = get_vault()
 
 def init_clob():
     try:
-        # SIGNATURE FIX: Use 0 for standard private keys (fixes 400 Invalid Signature)
         sig_type = int(os.getenv("SIGNATURE_TYPE", 0)) 
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
         client = ClobClient(
@@ -138,14 +137,21 @@ async def main_handler(update, context):
             await m.edit_text("<b>OPPORTUNITIES FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
+        # Time Sync Diagnostic
+        try:
+            st = requests.get("https://clob.polymarket.com/health").json().get('timestamp')
+            drift = int(time.time()) - int(st)
+            sync_status = "✅ SYNCED" if abs(drift) < 5 else f"⚠️ DRIFT: {drift}s"
+        except: sync_status = "❌ HEALTH CHECK FAIL"
+        
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Status:</b> {sync_status}\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
         try:
-            msg = await update.message.reply_text("⌛ <b>SENDING APPROVAL...</b>", parse_mode='HTML')
+            msg = await update.message.reply_text("⌛ <b>SENDING...</b>", parse_mode='HTML')
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
                 'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address),
                 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
@@ -173,20 +179,27 @@ async def handle_query(update, context):
         results = []
         for (t_id, amt, price) in [(target['yes_id'], calc['stake_yes'], target['p_y']), (target['no_id'], calc['stake_no'], target['p_n'])]:
             try:
-                # BUFFERS: Ensure order price clears the book level
+                # BUFFERS & PRECISION
                 adj_price = round(price * 1.02, 2)
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(round(amt, 2)), side=BUY, price=float(adj_price))
                 
-                # HEAL: Satisfy internal attribute lookup for 'size'
+                # HEAL: Poly SDK size injection
                 if not hasattr(order, 'size'): setattr(order, 'size', float(round(amt, 2)))
                 
-                # SIGNATURE FIX: Use create_market_order for correct EIP-712 hashing
+                # EXECUTE
                 signed_order = clob_client.create_market_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
-                results.append(True if (resp.get("success") or "order_id" in resp) else False)
+                
+                # VERBOSE ERROR LOGGING
+                if resp.get("success") or "order_id" in resp:
+                    results.append(True)
+                else:
+                    print(f"Trade Refused for {t_id}: {resp}")
+                    results.append(False)
             except Exception as e:
                 print(f"Exception: {e}"); results.append(False)
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console/system time."
+                
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck VAULT for Sync Status."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
