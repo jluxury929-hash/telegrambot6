@@ -15,6 +15,13 @@ from py_clob_client.order_builder.constants import BUY
 getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
+# Create a global session for consistent headers
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+})
 
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
@@ -24,7 +31,7 @@ LOGO = """<code>█████╗ ██████╗ ███████�
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v238-FINAL</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v239-ULTRA</code>"""
 
 # --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
@@ -80,7 +87,7 @@ clob_client = init_clob()
 # --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
-    if combined_prob <= 0 or combined_prob >= 1.0: return None
+    if combined_prob <= 0 or combined_prob >= 0.999: return None # Filter out non-arbs
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
     if stake_yes < 1.0 or stake_no < 1.0: return None
@@ -93,7 +100,7 @@ def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
 async def fetch_full_market(cond_id):
     try:
         url = f"https://clob.polymarket.com/markets/{cond_id}"
-        r = await asyncio.to_thread(requests.get, url, timeout=5)
+        r = await asyncio.to_thread(session.get, url, timeout=5)
         d = r.json()
         return {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
     except: return None
@@ -105,7 +112,7 @@ async def scour_arbitrage():
     for tag in tags:
         url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=15&tag_id={tag}"
         try:
-            resp = await asyncio.to_thread(requests.get, url, timeout=5)
+            resp = await asyncio.to_thread(session.get, url, timeout=5)
             for e in resp.json():
                 m = e.get('markets', [])
                 if not m: continue
@@ -124,7 +131,7 @@ async def scour_arbitrage():
 # --- 5. BOT LOGIC ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA SYNC ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA ULTRA ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
@@ -135,16 +142,13 @@ async def main_handler(update, context):
             await m.edit_text("<b>OPPORTUNITIES FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
-        # Time Sync Diagnostic with Headers to avoid Fail
-        headers = {'User-Agent': 'Mozilla/5.0'}
         try:
-            r = requests.get("https://clob.polymarket.com/health", headers=headers, timeout=5)
+            r = session.get("https://clob.polymarket.com/health", timeout=5)
             st = r.json().get('timestamp')
             drift = int(time.time()) - int(st)
             sync_status = "✅ SYNCED" if abs(drift) < 5 else f"⚠️ DRIFT: {drift}s"
-        except Exception as e:
-            sync_status = "❌ API BLOCK (Check RPC)"
-            print(f"Health Check Error: {e}")
+        except:
+            sync_status = "❌ API BLOCK (Check IP)"
         
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Status:</b> {sync_status}\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
@@ -165,7 +169,7 @@ async def main_handler(update, context):
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    stake = float(context.user_data.get('stake', 50))
+    stake = float(context.user_data.get('stake', 5)) # Default to $5 given your $8 balance
     if "SET_" in q.data:
         context.user_data['stake'] = int(q.data.split("_")[1])
         await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
@@ -176,27 +180,29 @@ async def handle_query(update, context):
         kb = [[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif "EXE_" in q.data:
+        # Check balance before trying
+        bal = usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6
+        if bal < stake:
+            await context.bot.send_message(q.message.chat_id, f"❌ <b>INSUFFICIENT FUNDS</b>\nHave: ${bal:.2f} | Need: ${stake}", parse_mode='HTML')
+            return
+
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
         for (t_id, amt, price) in [(target['yes_id'], calc['stake_yes'], target['p_y']), (target['no_id'], calc['stake_no'], target['p_n'])]:
             try:
-                adj_price = round(price * 1.05, 2) # Slightly larger buffer for execution
+                # Execution with slippage protection
+                adj_price = round(price * 1.05, 2)
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(round(amt, 2)), side=BUY, price=float(adj_price))
                 if not hasattr(order, 'size'): setattr(order, 'size', float(round(amt, 2)))
                 
                 signed_order = clob_client.create_market_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
-                
-                if resp.get("success") or "order_id" in resp:
-                    results.append(True)
-                else:
-                    print(f"Refused: {resp}")
-                    results.append(False)
+                results.append(True if (resp.get("success") or "order_id" in resp) else False)
             except Exception as e:
-                print(f"Exception: {e}"); results.append(False)
+                print(f"Trade Error: {e}"); results.append(False)
                 
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for API Block."
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for API/Drift logs."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
