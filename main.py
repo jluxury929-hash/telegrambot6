@@ -177,18 +177,22 @@ async def handle_query(update, context):
         results = []
         for (t_id, amt, price) in [(target['yes_id'], calc['stake_yes'], target['p_y']), (target['no_id'], calc['stake_no'], target['p_n'])]:
             try:
-                # FIX: Added a 1% slippage buffer to the price to ensure the order fills
-                adj_price = round(price * 1.01, 2)
+                # Slippage tolerance @ 5%
+                adj_price = round(price * 1.05, 2)
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 signed_order = clob_client.create_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
+                
+                # DIAGNOSTIC: This will show you exactly why Polymarket said NO.
                 if resp.get("success") or "order_id" in resp:
                     results.append(True)
                 else:
-                    print(f"API Error for token {t_id}: {resp}")
+                    print(f"--- POLYMARKET REJECTED ---")
+                    print(f"Token: {t_id} | Response: {resp}")
                     results.append(False)
             except Exception as e:
-                print(f"Execution Exception: {e}")
+                print(f"--- SYSTEM CRASH ---")
+                print(f"Error: {e}")
                 results.append(False)
         status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for API details."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
@@ -200,9 +204,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active. Monitoring for Arbitrage...")
     app.run_polling()
-
-
-
 
 
 
