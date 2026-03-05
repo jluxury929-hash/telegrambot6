@@ -24,7 +24,7 @@ LOGO = """<code>█████╗ ██████╗ ███████�
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v237-STABLE</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v238-FINAL</code>"""
 
 # --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
@@ -80,16 +80,14 @@ clob_client = init_clob()
 # --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
-    if combined_prob <= 0: return None
+    if combined_prob <= 0 or combined_prob >= 1.0: return None
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
     if stake_yes < 1.0 or stake_no < 1.0: return None
-    expected_payout = (stake_yes / p_yes)
-    profit = expected_payout - total_capital
-    roi = (profit / total_capital) * 100
+    profit = (stake_yes / p_yes) - total_capital
     return {
         "stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2),
-        "profit": round(profit, 2), "roi": round(roi, 2), "eff": round(combined_prob, 4)
+        "roi": round((profit / total_capital) * 100, 2), "eff": round(combined_prob, 4)
     }
 
 async def fetch_full_market(cond_id):
@@ -126,7 +124,7 @@ async def scour_arbitrage():
 # --- 5. BOT LOGIC ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA SYNC ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
@@ -137,12 +135,16 @@ async def main_handler(update, context):
             await m.edit_text("<b>OPPORTUNITIES FOUND:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("🛰 <b>NO ARBITRAGE DETECTED.</b>")
     elif 'VAULT' in cmd:
-        # Time Sync Diagnostic
+        # Time Sync Diagnostic with Headers to avoid Fail
+        headers = {'User-Agent': 'Mozilla/5.0'}
         try:
-            st = requests.get("https://clob.polymarket.com/health").json().get('timestamp')
+            r = requests.get("https://clob.polymarket.com/health", headers=headers, timeout=5)
+            st = r.json().get('timestamp')
             drift = int(time.time()) - int(st)
             sync_status = "✅ SYNCED" if abs(drift) < 5 else f"⚠️ DRIFT: {drift}s"
-        except: sync_status = "❌ HEALTH CHECK FAIL"
+        except Exception as e:
+            sync_status = "❌ API BLOCK (Check RPC)"
+            print(f"Health Check Error: {e}")
         
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Status:</b> {sync_status}\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
@@ -179,27 +181,22 @@ async def handle_query(update, context):
         results = []
         for (t_id, amt, price) in [(target['yes_id'], calc['stake_yes'], target['p_y']), (target['no_id'], calc['stake_no'], target['p_n'])]:
             try:
-                # BUFFERS & PRECISION
-                adj_price = round(price * 1.02, 2)
+                adj_price = round(price * 1.05, 2) # Slightly larger buffer for execution
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(round(amt, 2)), side=BUY, price=float(adj_price))
-                
-                # HEAL: Poly SDK size injection
                 if not hasattr(order, 'size'): setattr(order, 'size', float(round(amt, 2)))
                 
-                # EXECUTE
                 signed_order = clob_client.create_market_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
                 
-                # VERBOSE ERROR LOGGING
                 if resp.get("success") or "order_id" in resp:
                     results.append(True)
                 else:
-                    print(f"Trade Refused for {t_id}: {resp}")
+                    print(f"Refused: {resp}")
                     results.append(False)
             except Exception as e:
                 print(f"Exception: {e}"); results.append(False)
                 
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck VAULT for Sync Status."
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for API Block."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
@@ -207,7 +204,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot Active.")
     app.run_polling()
 
 
