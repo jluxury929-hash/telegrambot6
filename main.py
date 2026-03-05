@@ -25,7 +25,7 @@ LOGO = """<code>█████╗ ██████╗ ███████�
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-PRO</code>"""
 
 # --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
@@ -50,7 +50,7 @@ ERC20_ABI = [
 ]
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
-# --- 3. VAULT & CLOB AUTH (INTEGRATED AUTO-DERIVATION) ---
+# --- 3. VAULT & CLOB AUTH (SDK AUTO-DERIVATION FIX) ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -61,27 +61,24 @@ def get_vault():
 vault = get_vault()
 
 def init_clob():
-    """Applies the SDK fix: Uses L1 Auth to derive L2 API credentials automatically"""
+    """SDK FIX: Derives L2 Credentials using L1 Private Key Signature"""
     try:
         sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
-        funder = os.getenv("FUNDER_ADDRESS", vault.address)
+        funder = Web3.to_checksum_address(os.getenv("FUNDER_ADDRESS", vault.address))
         
-        # Initialize client with L1 Private Key
         client = ClobClient(
             host="https://clob.polymarket.com", 
             key=vault.key.hex(), 
             chain_id=137, 
             signature_type=sig_type, 
-            funder=Web3.to_checksum_address(funder)
+            funder=funder
         )
         
-        # THE FIX: This replaces the manual API Key entry. 
-        # It signs an L1 message to fetch your L2 credentials.
-        print("Hydra: Deriving L2 API Credentials...")
+        # This calls the POST/GET /auth/api-key endpoints internally
+        print("Hydra: Deriving API credentials via L1 Auth...")
         creds = client.create_or_derive_api_creds()
         client.set_api_creds(creds)
         
-        print("Hydra: Authentication Secured.")
         return client
     except Exception as e:
         print(f"Auth derivation failed: {e}")
@@ -93,14 +90,15 @@ clob_client = init_clob()
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
-    stake_yes = (p_no / combined_prob) * total_capital
-    stake_no = (p_yes / combined_prob) * total_capital
+    # Use floor to ensure we don't try to spend slightly more than balance
+    stake_yes = np.floor(((p_no / combined_prob) * total_capital) * 100) / 100
+    stake_no = np.floor(((p_yes / combined_prob) * total_capital) * 100) / 100
     if stake_yes < 1.0 or stake_no < 1.0: return None
     expected_payout = (stake_yes / p_yes)
-    profit = expected_payout - total_capital
-    roi = (profit / total_capital) * 100
+    profit = expected_payout - (stake_yes + stake_no)
+    roi = (profit / (stake_yes + stake_no)) * 100
     return {
-        "stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2),
+        "stake_yes": stake_yes, "stake_no": stake_no,
         "profit": round(profit, 2), "roi": round(roi, 2), "eff": round(combined_prob, 4)
     }
 
@@ -137,9 +135,9 @@ async def scour_arbitrage():
 
 # --- 5. BOT LOGIC ---
 async def start(update, context):
-    status = "🟢 SYSTEM READY" if clob_client else "🔴 AUTH ERROR"
+    status = "🟢 HYDRA READY" if clob_client else "🔴 AUTH FAILED"
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>{status}</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>SYSTEM:</b> {status}", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
@@ -153,7 +151,7 @@ async def main_handler(update, context):
     elif 'VAULT' in cmd:
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
         bal = usdc_e_contract.functions.balanceOf(funder).call()
-        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>Proxy/Funder:</b> <code>{funder}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>Funder:</b> <code>{funder}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -185,11 +183,18 @@ async def handle_query(update, context):
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        results = []
         
+        # 1. BALANCE CHECK
+        funder = os.getenv("FUNDER_ADDRESS", vault.address)
+        bal = usdc_e_contract.functions.balanceOf(funder).call() / 1e6
+        if bal < (calc['stake_yes'] + calc['stake_no']):
+             await context.bot.send_message(q.message.chat_id, f"❌ <b>INSUFFICIENT FUNDS:</b> Balance is ${bal:.2f}", parse_mode='HTML')
+             return
+
+        results = []
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # SDK uses L2 credentials derived at start to sign this buy order
+                # SDK uses derived creds to sign this market order
                 order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
                 signed_order = clob_client.create_order(order)
                 resp = clob_client.post_order(signed_order, OrderType.FOK)
@@ -197,26 +202,22 @@ async def handle_query(update, context):
                 if resp.get("success") or "order_id" in resp:
                     results.append(True)
                 else:
-                    print(f"Post-order Error: {resp}")
+                    print(f"Token {t_id} Rejection: {resp}")
                     results.append(False)
             except Exception as e:
-                print(f"Execution Exception: {e}")
+                print(f"Exception: {e}")
                 results.append(False)
         
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nVerify USDC.e balance or Funder Address."
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nCheck console for details."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
-    if not clob_client:
-        print("Bot failed to initialize. Check your WALLET_SEED and FUNDER_ADDRESS.")
-    else:
-        app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CallbackQueryHandler(handle_query))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-        print("Hydra Bot Active. Authentication derived.")
-        app.run_polling()
-
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_query))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+    print("Hydra Bot Active. Monitoring...")
+    app.run_polling()
 
 
 
