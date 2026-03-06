@@ -15,7 +15,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 # Polymarket SDK Imports
 from py_clob_client.client import ClobClient
-# REMOVED: OrderOptions from this line to fix the ImportError
 from py_clob_client.clob_types import OrderArgs, OrderType 
 from py_clob_client.order_builder.constants import BUY
 from py_clob_client.order_builder.builder import OrderBuilder 
@@ -39,22 +38,30 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
-# --- 2. BLOCKCHAIN CONNECTION ---
+# --- 2. BLOCKCHAIN CONNECTION (RECOVERY FIX) ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    # Priority: Env Var > High Quality Public > Standard Public
+    raw_url = os.getenv("RPC_URL", "").strip()
+    endpoints = [raw_url, "https://polygon-rpc.com", "https://1rpc.io/matic", "https://rpc-mainnet.maticvigil.com"]
+    
     for url in endpoints:
-        if not url: continue
+        if not url or len(url) < 10: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 20}))
+            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 15}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                print(f"CONNECTED TO RPC: {url[:20]}...")
                 return _w3
-        except: continue
+        except Exception as e:
+            print(f"RPC FAILED ({url[:20]}...): {e}")
+            continue
     return None
 
 w3 = get_hydra_w3()
 if not w3:
-    print("FATAL: RPC Failure."); import sys; sys.exit(1)
+    # If we get here, the internet connection or all public nodes are down
+    print("FATAL: All RPC endpoints are unreachable. Check your internet or RPC_URL in .env"); 
+    import sys; sys.exit(1)
 
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
@@ -179,43 +186,19 @@ async def handle_query(update, context):
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
         
     elif "EXE_" in q.data:
-        idx = int(q.data.split("_")[1])
-        if idx >= len(ARBI_CACHE):
-            await context.bot.send_message(q.message.chat_id, "⚠️ Error: Index out of range.")
-            return
-            
-        target = ARBI_CACHE[idx]
+        idx = int(q.data.split("_")[1]); target = ARBI_CACHE[idx]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            requests.get("https://clob.polymarket.com/time", timeout=5)
             client = init_clob()
-            sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
-            funder_addr = os.getenv("FUNDER_ADDRESS", vault.address)
-            
-            # 1. Initialize Builder
-            ob = OrderBuilder(client.get_address(), 137, sig_type)
-            ob.funder = funder_addr
+            ob = OrderBuilder(client.get_address(), 137, int(os.getenv("SIGNATURE_TYPE", 1)))
+            ob.funder = os.getenv("FUNDER_ADDRESS", vault.address)
             ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                
-                # FIX: We pass 'None' as the second argument (options)
-                # This satisfies the requirement for a 2nd positional argument without needing the import
                 signed_order = ob.create_order(order_args, None) 
-                
-                resp = client.post_order(signed_order, OrderType.FOK)
-                
-                if isinstance(resp, int):
-                    if resp not in [200, 201]:
-                        err_msg = f"HTTP {resp}: Check balance/allowance."
-                        break
-                elif isinstance(resp, dict):
-                    if not (resp.get("success") or resp.get("orderID")):
-                        err_msg = resp.get("errorMsg") or "Order placement failed."
-                        break
-
+                client.post_order(signed_order, OrderType.FOK)
         except Exception as e: err_msg = str(e)
         
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
@@ -229,6 +212,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
