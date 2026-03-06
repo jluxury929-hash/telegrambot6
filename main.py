@@ -74,8 +74,6 @@ def init_clob():
         print(f"Auth derivation failed: {e}")
         return None
 
-clob_client = init_clob()
-
 # --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
@@ -161,22 +159,21 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # FIX: Get server time to resolve clock drift 
-            time_resp = requests.get("https://clob.polymarket.com/time")
-            server_ts = int(time_resp.json().get('timestamp', time.time()))
-            
-            # Use fresh client with explicit signature handling
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
-                # Use server_ts - 1 to ensure it's valid when it reaches Amsterdam
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                
-                # Internal logic uses the timestamp; local_client ensures creds are valid
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
-                if not (resp.get("success") or resp.get("orderID")):
-                    err_msg = resp.get("errorMsg") or str(resp)
-                    break 
+                
+                # FIX: Handle SDK returning raw integer codes vs dicts
+                if isinstance(resp, int):
+                    if resp not in [200, 201]:
+                        err_msg = f"API Error Code: {resp}"
+                        break
+                elif isinstance(resp, dict):
+                    if not (resp.get("success") or resp.get("orderID")):
+                        err_msg = resp.get("errorMsg") or "Order Rejection"
+                        break
         except Exception as e: err_msg = str(e)
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
@@ -186,6 +183,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start)); app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active..."); app.run_polling()
+
 
 
 
