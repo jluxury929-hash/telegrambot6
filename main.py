@@ -25,9 +25,7 @@ load_dotenv()
 ARBI_CACHE = []
 
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-# Standard Exchange Address
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
-# Neg-Risk Exchange Address
 NEG_RISK_EXCHANGE = Web3.to_checksum_address("0xC5d563A36AE78145C45a50134d48A1215220f80a")
 
 ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}]
@@ -194,20 +192,13 @@ async def handle_query(update, context):
             requests.get("https://clob.polymarket.com/time", timeout=5)
             client = init_clob()
             sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
+            funder_addr = os.getenv("FUNDER_ADDRESS", vault.address)
             
-            # FIX: Use the SDK's internal logic by providing the exact contract address
-            # rather than using the 'neg_risk' keyword which your version rejects.
-            target_exchange = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
+            # FIX: Only 4 positional arguments, funder is the last one.
+            ob = OrderBuilder(client.get_address(), 137, sig_type, funder_addr)
             
-            # Initialize OrderBuilder with explicit funder and exchange address
-            ob = OrderBuilder(
-                client.get_address(), 
-                137, 
-                sig_type, 
-                funder=os.getenv("FUNDER_ADDRESS", vault.address)
-            )
-            # Manually set the exchange to ensure EIP-712 hashing is correct
-            ob.contract_address = target_exchange
+            # Manually set the contract address based on market type for hashing
+            ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
@@ -236,6 +227,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
