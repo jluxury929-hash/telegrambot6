@@ -144,7 +144,8 @@ async def main_handler(update, context):
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250, 500]]]
+        # Re-added $5 calibration
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
         try:
@@ -173,12 +174,13 @@ async def handle_query(update, context):
         
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                expiry = int(time.time() + 120)
-                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY, expiration=expiry)
+                # FIXED: Removed 'expiration' from constructor to avoid unexpected keyword error
+                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
                 
-                # Attribute patching for SDK consistency
-                if not hasattr(order_args, 'size'): setattr(order_args, 'size', float(amt))
-                if not hasattr(order_args, 'expiration'): setattr(order_args, 'expiration', expiry)
+                # FIXED: Manually inject attributes after instantiation
+                expiry = int(time.time() + 120)
+                setattr(order_args, 'size', float(amt))
+                setattr(order_args, 'expiration', expiry)
 
                 created_order = clob_client.create_order(order_args)
                 resp = clob_client.post_order(created_order)
@@ -200,6 +202,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling()
+
 
 
 
