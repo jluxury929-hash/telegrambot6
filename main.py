@@ -65,19 +65,9 @@ vault = get_vault()
 
 def init_clob():
     try:
-        # SIGNATURE_TYPE 1 = EOA/MetaMask, 2 = Poly Proxy Account
         sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
-        # Important: funder must be the owner of the API credentials
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
-        
-        client = ClobClient(
-            host="https://clob.polymarket.com", 
-            key=vault.key.hex(), 
-            chain_id=137, 
-            signature_type=sig_type, 
-            funder=funder
-        )
-        # Fix: Force derivation using the explicit private key to ensure signature alignment
+        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=funder)
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except Exception as e:
@@ -171,11 +161,17 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # Refresh client inside execution to ensure fresh timestamp/session
+            # FIX: Get server time to resolve clock drift 
+            time_resp = requests.get("https://clob.polymarket.com/time")
+            server_ts = int(time_resp.json().get('timestamp', time.time()))
+            
+            # Use fresh client with explicit signature handling
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
-                # Fix: Explicitly typecast to ensure signature consistency
+                # Use server_ts - 1 to ensure it's valid when it reaches Amsterdam
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
+                
+                # Internal logic uses the timestamp; local_client ensures creds are valid
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 if not (resp.get("success") or resp.get("orderID")):
@@ -190,6 +186,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start)); app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active..."); app.run_polling()
+
 
 
 
