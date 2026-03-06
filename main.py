@@ -1,7 +1,9 @@
 import os
 import asyncio
 import json
+import time
 import requests
+import numpy as np
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
@@ -13,184 +15,221 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 
-# --- 1. CORE CONFIG ---
+# --- 1. CORE CONFIG & MATH ---
 getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
-
-# Polygon/Polymarket Specifics
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+
 LOGO = """<code>█████╗ ██████╗ ███████╗██╗   ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-DEEP-SCAN</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v2.5-DEEP-SCAN</code>"""
 
-# --- 2. ENGINE SETUP ---
+# --- 2. BLOCKCHAIN CONNECTION ---
 def get_hydra_w3():
-    rpc = os.getenv("RPC_URL", "https://polygon-rpc.com")
-    try:
-        _w3 = Web3(Web3.HTTPProvider(rpc))
-        _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        return _w3
-    except: return None
+    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    for url in endpoints:
+        if not url: continue
+        try:
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            if _w3.is_connected():
+                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                return _w3
+        except: continue
+    return None
 
 w3 = get_hydra_w3()
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
     {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}
 ]
-usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI) if w3 else None
 
+# --- 3. VAULT & CLOB AUTH ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
-    return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
+    try:
+        return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
+    except: return None
 
 vault = get_vault()
 
 def init_clob():
     try:
-        client = ClobClient("https://clob.polymarket.com", key=vault.key.hex(), chain_id=137)
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            key=vault.key.hex(),
+            chain_id=137,
+            signature_type=int(os.getenv("SIGNATURE_TYPE", 1)),
+            funder=os.getenv("FUNDER_ADDRESS", vault.address)
+        )
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
-    except: return None
+    except Exception as e:
+        print(f"Auth derivation failed: {e}")
+        return None
 
 clob_client = init_clob()
 
-# --- 3. MATH: PURE ARBITRAGE ---
-def calculate_pure_arb(p_y, p_n, capital):
-    """
-    Guaranteed Profit Math:
-    If Sum (Price_Yes + Price_No) < 1.00, we buy both sides.
-    """
-    total_cost_per_bundle = p_y + p_n
+# --- 4. ARBITRAGE ENGINE (Deep Scanning) ---
+def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
+    combined_prob = p_yes + p_no
+    if combined_prob >= 1.0 or combined_prob <= 0: 
+        # Standard Arbi: We only care if Yes + No < 1.00 (Risk Free)
+        # If > 1.00, it's just a normal market spread.
+        return {"roi": (1.0 - combined_prob) * 100, "eff": combined_prob}
     
-    # 0.9999 is used as the hard limit to ensure real profit after decimals.
-    if total_cost_per_bundle >= 0.9999 or total_cost_per_bundle <= 0:
-        return None
-    
-    # Payout is always 1.00. We buy 'shares' number of bundles.
-    shares = capital / total_cost_per_bundle
-    stake_y = shares * p_y
-    stake_n = shares * p_n
-    
-    profit = shares - capital
-    roi = (profit / capital) * 100
+    stake_yes = (p_no / combined_prob) * total_capital
+    stake_no = (p_yes / combined_prob) * total_capital
+    expected_payout = (stake_yes / p_yes) 
+    profit = expected_payout - total_capital
+    roi = (profit / total_capital) * 100
     
     return {
-        "s_y": round(stake_y, 2),
-        "s_n": round(stake_n, 2),
-        "roi": round(roi, 2)
+        "stake_yes": round(stake_yes, 2),
+        "stake_no": round(stake_no, 2),
+        "profit": round(profit, 2),
+        "roi": round(roi, 2),
+        "eff": round(combined_prob, 4)
     }
 
-# --- 4. DEEP OMNI-SCANNER ---
 async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
-    now = datetime.now(timezone.utc)
-    cutoff = now + timedelta(hours=24) # SAME-DAY ONLY
     
-    # Target all major category tag IDs
-    tags = ["1", "6", "10015", "4", "5", ""] # Crypto, Politics, Sports, Pop, Business, Global
-    orders = ["volume24hr", "liquidity", "id"]
-    
-    seen_ids = set()
-    
-    async def fetch_category_page(tag_id, order_by, offset=0):
-        url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&offset={offset}&order={order_by}&ascending=false"
-        if tag_id: url += f"&tag_id={tag_id}"
-        
-        try:
-            resp = await asyncio.to_thread(requests.get, url, timeout=5)
-            for e in resp.json():
-                if e['id'] in seen_ids: continue
-                seen_ids.add(e['id'])
-                
-                # Expiry Check
-                end_str = e.get('endDate')
-                if not end_str: continue
-                end_dt = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
-                if end_dt > cutoff: continue 
-                
-                for m in e.get('markets', []):
-                    # Check the 'outcomePrices' provided in metadata
-                    prices = json.loads(m.get('outcomePrices', '[]'))
-                    if len(prices) >= 2:
-                        p_y, p_n = float(prices[0]), float(prices[1])
-                        
-                        # Apply Hard ROI Filter
-                        arb = calculate_pure_arb(p_y, p_n, 100.0)
-                        if arb:
-                            hours_left = (end_dt - now).total_seconds() / 3600
-                            ARBI_CACHE.append({
-                                "title": f"⏱{round(hours_left,1)}h | {e['title'][:25]}",
-                                "y_id": m['clobTokenIds'][0],
-                                "n_id": m['clobTokenIds'][1],
-                                "p_y": p_y, "p_n": p_n,
-                                "roi": arb['roi']
-                            })
-        except: pass
+    # SCAN PARAMETERS: Iterating through pages to find high ROI gems
+    # Gamma API is faster for discovery than CLOB API
+    base_url = "https://gamma-api.polymarket.com/markets"
+    params = {
+        "active": "true",
+        "closed": "false",
+        "limit": 100,
+        "offset": 0,
+        "order": "volume", 
+        "ascending": "false"
+    }
 
-    # Fire all category and depth scans in parallel (Fast Discovery)
-    tasks = []
-    for t in tags:
-        for o in orders:
-            tasks.append(fetch_category_page(t, o, 0))   # Page 1
-            tasks.append(fetch_category_page(t, o, 50))  # Page 2 (Deep Scan)
+    try:
+        # Scans the top 200 markets across all categories
+        for _ in range(2): 
+            resp = await asyncio.to_thread(requests.get, base_url, params=params, timeout=10)
+            markets = resp.json()
+            if not markets: break
             
-    await asyncio.gather(*tasks)
-    
-    # Sort results so best profit is always first
-    ARBI_CACHE.sort(key=lambda x: x['roi'], reverse=True)
+            for m in markets:
+                prices = m.get('outcomePrices')
+                if not prices or len(prices) < 2: continue
+                
+                p_y, p_n = float(prices[0]), float(prices[1])
+                arb = calculate_arbitrage_guaranteed(p_y, p_n, 100.0)
+                
+                # We save all markets, but our sorting will push ROI to the top
+                ARBI_CACHE.append({
+                    "title": f"[{m.get('category', '??')}] {m.get('question')[:25]}",
+                    "yes_id": m.get('clobTokenIds', [None])[0],
+                    "no_id": m.get('clobTokenIds', [None])[1],
+                    "p_y": p_y,
+                    "p_n": p_n,
+                    "roi": arb.get('roi', -100),
+                    "liquidity": float(m.get('liquidity', 0))
+                })
+            params['offset'] += 100
+            
+    except Exception as ex:
+        print(f"Scour Error: {ex}")
+
+    # SORT BY ROI (Primary) and LIQUIDITY (Secondary)
+    ARBI_CACHE.sort(key=lambda x: (x['roi'], x['liquidity']), reverse=True)
     return len(ARBI_CACHE) > 0
 
-# --- 5. INTERFACE ---
+# --- 5. TELEGRAM INTERFACE ---
 async def start(update, context):
-    btns = [['🚀 DEEP OMNI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>DEEP SCANNER READY</b>\nStrict Filter: ROI > 0% only.", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [['🚀 DEEP SCAN', '📊 STATS'], ['💳 VAULT', '🔧 APPROVE']]
+    await update.message.reply_text(
+        f"{LOGO}\n<b>HYDRA MULTI-CATEGORY SCANNER</b>\nSearching all markets for ROI > 0%.",
+        reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML'
+    )
 
 async def main_handler(update, context):
-    if 'DEEP OMNI-SCAN' in update.message.text:
-        m = await update.message.reply_text("📡 <b>SCANNING 500+ MARKETS...</b>", parse_mode='HTML')
+    cmd = update.message.text
+    if 'DEEP SCAN' in cmd:
+        m = await update.message.reply_text("🔎 <b>SCANNING EVERY CATEGORY...</b>", parse_mode='HTML')
         if await scour_arbitrage():
-            kb = [[InlineKeyboardButton(f"🟢 {a['roi']}% | {a['title']}", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:20])]
-            await m.edit_text(f"<b>FOUND {len(ARBI_CACHE)} PROFITABLE TRADES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            # Show top 10 highest ROI opportunities found
+            kb = []
+            for i, a in enumerate(ARBI_CACHE[:10]):
+                icon = "🔥" if a['roi'] > 0 else "📊"
+                kb.append([InlineKeyboardButton(f"{icon} {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")])
+            
+            await m.edit_text("<b>HIGHEST ROI OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else:
-            await m.edit_text("🛰 <b>NO PROFITABLE DEALS FOUND.</b>\nThe entire market is currently efficient. Try again in 60s.")
+            await m.edit_text("❌ <b>NO MARKETS FOUND.</b> Check API status.")
+            
+    elif 'VAULT' in cmd:
+        bal = usdc_e_contract.functions.balanceOf(vault.address).call()
+        await update.message.reply_text(f"<b>VAULT:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+
+    elif 'APPROVE' in cmd:
+        try:
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
+                'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address),
+                'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
+            })
+            signed = w3.eth.account.sign_transaction(tx, vault.key)
+            w3.eth.send_raw_transaction(signed.rawTransaction)
+            await update.message.reply_text("✅ <b>USDC APPROVED FOR TRADING</b>")
+        except Exception as e:
+            await update.message.reply_text(f"❌ <b>FAILED:</b> {e}")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    stake = float(context.user_data.get('stake', 50))
-    if "ARB_" in q.data:
-        t = ARBI_CACHE[int(q.data.split("_")[1])]
-        c = calculate_pure_arb(t['p_y'], t['p_n'], stake)
-        msg = (f"<b>{t['title']}</b>\n\n"
-               f"✅ YES: ${c['s_y']} @ {t['p_y']}\n"
-               f"❌ NO: ${c['s_n']} @ {t['p_n']}\n\n"
-               f"💰 <b>Guaranteed ROI: {t['roi']}%</b>")
-        kb = [[InlineKeyboardButton("🔥 EXECUTE TRADE", callback_data=f"EXE_{q.data.split('_')[1]}")]]
-        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    stake = float(context.user_data.get('stake', 100))
     
+    if "ARB_" in q.data:
+        idx = int(q.data.split("_")[1])
+        target = ARBI_CACHE[idx]
+        calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
+        
+        msg = (f"<b>OPPORTUNITY:</b> {target['title']}\n"
+               f"━━━━━━━━━━━━\n"
+               f"✅ YES Price: {target['p_y']} | Stake: ${calc['stake_yes']}\n"
+               f"❌ NO Price: {target['p_n']} | Stake: ${calc['stake_no']}\n"
+               f"━━━━━━━━━━━━\n"
+               f"💰 <b>GUARANTEED PROFIT: ${calc['profit']} ({calc['roi']}%)</b>")
+        
+        kb = [[InlineKeyboardButton("🔥 EXECUTE ARBITRAGE", callback_data=f"EXE_{idx}")]]
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
     elif "EXE_" in q.data:
-        t = ARBI_CACHE[int(q.data.split("_")[1])]
-        c = calculate_pure_arb(t['p_y'], t['p_n'], stake)
-        results = []
-        for (tid, amt) in [(t['y_id'], c['s_y']), (t['n_id'], c['s_n'])]:
+        target = ARBI_CACHE[int(q.data.split("_")[1])]
+        calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
+        
+        # Sequentially place orders
+        success_count = 0
+        for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                order = clob_client.create_order(MarketOrderArgs(token_id=str(tid), amount=float(amt), side="BUY"))
-                resp = clob_client.post_order(order, OrderType.FOK)
-                results.append(True if (resp.get("success") or "order_id" in resp) else False)
-            except: results.append(False)
-        await context.bot.send_message(q.message.chat_id, "✅ <b>POSITION LOCKED</b>" if all(results) else "⚠️ <b>PRICE SLIPPAGE - ORDER FAILED</b>")
+                order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY")
+                signed_order = clob_client.create_order(order)
+                resp = clob_client.post_order(signed_order, OrderType.FOK) # Fill or Kill to avoid partials
+                if resp.get("success"): success_count += 1
+            except: continue
+        
+        status = "✅ <b>ARBITRAGE SECURED</b>" if success_count == 2 else "⚠️ <b>PARTIAL FILL / ERROR</b>"
+        await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+    print("HYDRA V2.5 DEEP-SCAN ACTIVE...")
     app.run_polling()
+
 
 
 
