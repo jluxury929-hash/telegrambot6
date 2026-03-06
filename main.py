@@ -38,30 +38,23 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
-# --- 2. BLOCKCHAIN CONNECTION (RECOVERY FIX) ---
+# --- 2. BLOCKCHAIN CONNECTION (RPC RECOVERY) ---
 def get_hydra_w3():
-    # Priority: Env Var > High Quality Public > Standard Public
     raw_url = os.getenv("RPC_URL", "").strip()
     endpoints = [raw_url, "https://polygon-rpc.com", "https://1rpc.io/matic", "https://rpc-mainnet.maticvigil.com"]
-    
     for url in endpoints:
         if not url or len(url) < 10: continue
         try:
             _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 15}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                print(f"CONNECTED TO RPC: {url[:20]}...")
                 return _w3
-        except Exception as e:
-            print(f"RPC FAILED ({url[:20]}...): {e}")
-            continue
+        except: continue
     return None
 
 w3 = get_hydra_w3()
 if not w3:
-    # If we get here, the internet connection or all public nodes are down
-    print("FATAL: All RPC endpoints are unreachable. Check your internet or RPC_URL in .env"); 
-    import sys; sys.exit(1)
+    print("FATAL: RPC Failure."); import sys; sys.exit(1)
 
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
@@ -82,7 +75,6 @@ def init_clob():
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except Exception as e:
-        print(f"Auth derivation failed: {e}")
         return None
 
 # --- 4. ENGINE LOGIC ---
@@ -101,7 +93,6 @@ async def fetch_full_market(cond_id):
     try:
         r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/markets/{cond_id}", timeout=5)
         d = r.json()
-        if not d or 'tokens' not in d: return None
         return {
             "tokens": {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])},
             "neg_risk": d.get("neg_risk", False)
@@ -116,21 +107,18 @@ async def scour_arbitrage():
         try:
             resp = await asyncio.to_thread(requests.get, f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}", timeout=5)
             data = resp.json()
-            if not isinstance(data, list): continue
             for e in data:
-                m_list = e.get('markets', [])
-                if not m_list: continue
-                m = m_list[0]
+                m = e.get('markets', [{}])[0]
                 if not m.get('conditionId'): continue
                 end_dt = datetime.fromisoformat(m['endDate'].replace('Z', '+00:00'))
                 if end_dt.timestamp() > limit_ts: continue
                 m_data = await fetch_full_market(m['conditionId'])
-                if m_data and 'YES' in m_data['tokens'] and 'NO' in m_data['tokens']:
+                if m_data and 'YES' in m_data['tokens']:
                     arb = calculate_arbitrage_guaranteed(m_data['tokens']['YES']['price'], m_data['tokens']['NO']['price'], 100.0)
                     if arb:
                         ARBI_CACHE.append({
                             "title": f"[{round((end_dt.timestamp()-time.time())/86400, 1)}d] " + e.get('title')[:25], 
-                            "condition_id": m['conditionId'], 
+                            "condition_id": m['conditionId'],
                             "yes_id": m_data['tokens']['YES']['id'], 
                             "no_id": m_data['tokens']['NO']['id'], 
                             "p_y": m_data['tokens']['YES']['price'], 
@@ -176,11 +164,7 @@ async def handle_query(update, context):
         await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
         
     elif "ARB_" in q.data:
-        idx = int(q.data.split("_")[1])
-        if idx >= len(ARBI_CACHE):
-            await q.edit_message_text("⚠️ Data expired. Please re-scan.")
-            return
-        target = ARBI_CACHE[idx]
+        idx = int(q.data.split("_")[1]); target = ARBI_CACHE[idx]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         msg = f"<b>PLAN:</b> {target['title']}\n📅 <b>Ends:</b> {target['ends']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
@@ -191,13 +175,19 @@ async def handle_query(update, context):
         err_msg = ""
         try:
             client = init_clob()
+            if not client: raise Exception("Auth Failed")
+            
+            # CRITICAL FIX: Get market metadata to satisfy tick_size requirement
+            market_metadata = client.get_market(target['condition_id'])
+            
             ob = OrderBuilder(client.get_address(), 137, int(os.getenv("SIGNATURE_TYPE", 1)))
             ob.funder = os.getenv("FUNDER_ADDRESS", vault.address)
             ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                signed_order = ob.create_order(order_args, None) 
+                # Pass market_metadata as the 2nd positional argument
+                signed_order = ob.create_order(order_args, market_metadata) 
                 client.post_order(signed_order, OrderType.FOK)
         except Exception as e: err_msg = str(e)
         
@@ -212,6 +202,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
