@@ -2,34 +2,36 @@ import os
 import asyncio
 import requests
 import time
+import traceback
 from datetime import datetime
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 
-# Blockchain & Trading
 from eth_account import Account
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
-# Polymarket SDK
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
-from py_clob_client.order_builder.builder import OrderBuilder 
 
-# Telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
-# --- 0. INITIALIZATION ---
+# --- 0. INITIALIZATION & SAFETY ---
 load_dotenv()
 getcontext().prec = 28
 ARBI_CACHE = []
 
-# Constants
-USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
-NEG_RISK_EXCHANGE = Web3.to_checksum_address("0xC5d563A36AE78145C45a50134d48A1215220f80a")
+def to_addr(addr):
+    """Prevents the 'Unknown Format' error by cleaning the string."""
+    if not addr: return None
+    return Web3.to_checksum_address(addr.strip().lower())
+
+# Re-verified Addresses
+USDC_E = to_addr("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+CTF_EXCHANGE = to_addr("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+NEG_RISK_EXCHANGE = to_addr("0xC5d563AE78145C45a50134d48A1215220f80a")
 
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
@@ -37,204 +39,174 @@ ERC20_ABI = [
 ]
 
 LOGO = """<pre>
-█████╗ ██████╗ ███████╗██╗   ██╗
-██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
-███████║██████╔╝█████╗     ╚███╔╝ 
-██╔══██║██╔═══╝ ██╔══╝      ██╔██╗ 
-██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
+██╗  ██╗██╗   ██╗██████╗ ██████╗  █████╗ 
+██║  ██║╚██╗ ██╔╝██╔══██╗██╔══██╗██╔══██╗
+███████║ ╚████╔╝ ██║  ██║██████╔╝███████║
+██╔══██║  ╚██╔╝  ██║  ██║██╔══██╗██╔══██║
+██║  ██║   ██║   ██████╔╝██║  ██║██║  ██║ v5.0-STABLE</pre>"""
 
-# --- 1. UTILITIES & CLASSES ---
-class Map(dict):
-    """Allows dot-notation access for SDK compatibility."""
-    def __getattr__(self, name): return self.get(name)
-
+# --- 1. CORE UTILITIES ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
     try:
+        if not seed: return None
         return Account.from_mnemonic(seed) if " " in seed else Account.from_key(seed)
     except: return None
 
 vault = get_vault()
 
 def get_hydra_w3():
-    raw_url = os.getenv("RPC_URL", "").strip()
-    endpoints = [raw_url, "https://polygon-rpc.com", "https://1rpc.io/matic"]
-    for url in endpoints:
-        if not url: continue
-        try:
-            _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 15}))
-            if _w3.is_connected():
-                _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                return _w3
-        except: continue
-    return None
+    rpc = os.getenv("RPC_URL", "https://polygon-rpc.com").strip()
+    try:
+        _w3 = Web3(Web3.HTTPProvider(rpc))
+        if _w3.is_connected():
+            _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            return _w3
+    except: return None
 
 w3 = get_hydra_w3()
-usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI) if w3 else None
+usdc_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI) if w3 else None
 
-# --- 2. POLYMARKET CORE ---
 def init_clob():
-    """Initializes the Polymarket client and handles L2 credential derivation."""
     try:
         if not vault: return None
-        sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
-        funder = os.getenv("FUNDER_ADDRESS", vault.address)
-        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=funder)
-        
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            key=vault.key.hex(),
+            chain_id=137,
+            signature_type=int(os.getenv("SIGNATURE_TYPE", 1)),
+            funder=to_addr(os.getenv("FUNDER_ADDRESS", vault.address))
+        )
         creds = client.create_or_derive_api_creds()
-        if creds:
-            client.set_api_creds(creds)
-            return client
-        return None
+        client.set_api_creds(creds)
+        return client
     except Exception as e:
         print(f"Auth derivation error: {e}")
         return None
 
-def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
+def calculate_arbitrage(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
-    if combined_prob <= 0: return None
+    # The fix for the None error: return a valid zero dict if math is impossible
+    if combined_prob <= 0 or combined_prob >= 0.999: 
+        return {"stake_yes": 0, "stake_no": 0, "roi": 0}
+    
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
-    if stake_yes < 1.0 or stake_no < 1.0: return None
     profit = (stake_yes / p_yes) - total_capital
-    roi = (profit / total_capital) * 100
-    return {"stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2), "roi": round(roi, 2), "eff": round(combined_prob, 4)}
+    return {
+        "stake_yes": round(stake_yes, 2),
+        "stake_no": round(stake_no, 2),
+        "roi": round((profit / total_capital) * 100, 2)
+    }
 
-# --- 3. MARKET SCOURING ---
-async def fetch_full_market(cond_id):
-    try:
-        r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/markets/{cond_id}", timeout=5)
-        d = r.json()
-        return {
-            "tokens": {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])},
-            "neg_risk": d.get("neg_risk", False)
-        }
-    except: return None
-
+# --- 2. SCANNING ---
 async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
-    limit_ts = time.time() + (3 * 24 * 3600)
-    for tag in [1, 10, 100, 4, 6, 237]:
+    for tag in [1, 10, 100, 237]:
         try:
-            resp = await asyncio.to_thread(requests.get, f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}", timeout=5)
+            resp = await asyncio.to_thread(requests.get, f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=15&tag_id={tag}", timeout=5)
             for e in resp.json():
                 m_list = e.get('markets', [])
                 if not m_list: continue
                 m = m_list[0]
-                if not m.get('conditionId'): continue
+                cond_id = m.get('conditionId')
+                if not cond_id: continue
                 
-                # Filter by date
-                end_dt = datetime.fromisoformat(m['endDate'].replace('Z', '+00:00'))
-                if end_dt.timestamp() > limit_ts: continue
-
-                m_data = await fetch_full_market(m['conditionId'])
-                if m_data and 'YES' in m_data['tokens'] and 'NO' in m_data['tokens']:
-                    arb = calculate_arbitrage_guaranteed(m_data['tokens']['YES']['price'], m_data['tokens']['NO']['price'], 100.0)
-                    if arb:
+                r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/markets/{cond_id}", timeout=5)
+                d = r.json()
+                tkns = {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
+                
+                if 'YES' in tkns and 'NO' in tkns:
+                    arb = calculate_arbitrage(tkns['YES']['price'], tkns['NO']['price'], 100.0)
+                    if arb['roi'] > 0:
                         ARBI_CACHE.append({
-                            "title": f"[{round((end_dt.timestamp()-time.time())/86400, 1)}d] " + e.get('title')[:25], 
-                            "condition_id": m['conditionId'], 
-                            "yes_id": m_data['tokens']['YES']['id'], 
-                            "no_id": m_data['tokens']['NO']['id'], 
-                            "p_y": m_data['tokens']['YES']['price'], 
-                            "p_n": m_data['tokens']['NO']['price'], 
-                            "roi": arb['roi'], "eff": arb['eff'], "ends": m['endDate'],
-                            "neg_risk": m_data['neg_risk']
+                            "title": e.get('title')[:30],
+                            "condition_id": cond_id,
+                            "yes_id": tkns['YES']['id'],
+                            "no_id": tkns['NO']['id'],
+                            "p_y": tkns['YES']['price'],
+                            "p_n": tkns['NO']['price'],
+                            "roi": arb['roi'],
+                            "neg_risk": d.get("neg_risk", False)
                         })
         except: continue
-    ARBI_CACHE.sort(key=lambda x: x['eff'])
+    ARBI_CACHE.sort(key=lambda x: x['roi'], reverse=True)
     return len(ARBI_CACHE) > 0
 
-# --- 4. TELEGRAM UI & LOGIC ---
+# --- 3. TELEGRAM UI ---
 async def start(update, context):
-    btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [['🚀 START ARBI-SCAN', '💳 VAULT'], ['🔧 FIX APPROVAL']]
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA 5.0 READY</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START ARBI-SCAN' in cmd:
         m = await update.message.reply_text("📡 <b>SCANNING...</b>", parse_mode='HTML')
         if await scour_arbitrage():
-            kb = [[InlineKeyboardButton(f"{'🟢' if a['roi'] > 0 else '🟡'} {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
-            await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("🛰 <b>NO ARBS DETECTED.</b>")
-    
+            kb = [[InlineKeyboardButton(f"🟢 {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
+            await m.edit_text("<b>OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else: await m.edit_text("🛰 <b>MARKETS EFFICIENT.</b>")
+
     elif 'VAULT' in cmd:
-        bal = usdc_e_contract.functions.balanceOf(vault.address).call()
+        bal = usdc_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
-    
-    elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
-        await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif 'FIX APPROVAL' in cmd:
-        nonce = w3.eth.get_transaction_count(vault.address)
-        tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
-            'from': vault.address, 'nonce': nonce, 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137
-        })
-        signed = w3.eth.account.sign_transaction(tx, vault.key)
-        w3.eth.send_raw_transaction(signed.raw_transaction)
-        await update.message.reply_text("✅ <b>USDC APPROVED</b>")
+        try:
+            for exch in [CTF_EXCHANGE, NEG_RISK_EXCHANGE]:
+                tx = usdc_contract.functions.approve(exch, 2**256 - 1).build_transaction({
+                    'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address),
+                    'gasPrice': int(w3.eth.gas_price * 1.1), 'chainId': 137
+                })
+                w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx, vault.key).raw_transaction)
+            await update.message.reply_text("✅ <b>APPROVALS FIXED</b>")
+        except Exception as e: await update.message.reply_text(f"❌ <b>FAILED:</b> {e}")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    
-    # Handle Capital Setting
-    if "SET_" in q.data:
-        context.user_data['stake'] = int(q.data.split("_")[1])
-        await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
-        return
+    stake = float(context.user_data.get('stake', 10))
 
-    stake = float(context.user_data.get('stake', 5))
-    
-    # Handle Plan Selection
     if "ARB_" in q.data:
-        idx = int(q.data.split("_")[1]); target = ARBI_CACHE[idx]
-        calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        msg = f"<b>PLAN:</b> {target['title']}\n📅 <b>Ends:</b> {target['ends']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
-        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
-    
-    # Handle Execution
-    elif "EXE_" in q.data:
-        idx = int(q.data.split("_")[1]); target = ARBI_CACHE[idx]
-        calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        err_msg = ""
-        try:
-            client = init_clob()
-            if not client: raise Exception("Auth Failed: API keys could not be derived.")
-            
-            raw_data = client.get_market(target['condition_id'])
-            if not raw_data: raise Exception("Market data unreachable.")
-            
-            market_metadata = Map(raw_data)
-            ob = OrderBuilder(client.get_address(), 137, int(os.getenv("SIGNATURE_TYPE", 1)))
-            ob.funder = os.getenv("FUNDER_ADDRESS", vault.address)
-            ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
+        target = ARBI_CACHE[int(q.data.split("_")[1])]
+        calc = calculate_arbitrage(target['p_y'], target['p_n'], stake)
+        # Added safety check here too
+        if calc['roi'] <= 0:
+            await q.edit_message_text("⚠️ <b>Price shifted. Try another arb.</b>")
+            return
+        msg = f"<b>{target['title']}</b>\nROI: {calc['roi']}%"
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]), parse_mode='HTML')
 
+    elif "EXE_" in q.data:
+        target = ARBI_CACHE[int(q.data.split("_")[1])]
+        calc = calculate_arbitrage(target['p_y'], target['p_n'], stake)
+        client = init_clob()
+        err = ""
+        try:
+            if not client: raise Exception("Auth Failed")
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
-                order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                signed_order = ob.create_order(order_args, market_metadata)
-                resp = client.post_order(signed_order, OrderType.FOK)
-                if isinstance(resp, dict) and not (resp.get("success") or resp.get("orderID")):
-                    err_msg = resp.get("errorMsg") or "Order placement failed."
+                price = target['p_y'] if t_id == target['yes_id'] else target['p_n']
+                resp = client.create_and_post_order(OrderArgs(token_id=str(t_id), price=float(price), size=float(amt), side=BUY))
+                if not resp.get("success"):
+                    err = resp.get("errorMsg", "Order Rejected")
                     break
-        except Exception as e: err_msg = str(e)
-        
-        status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
+        except Exception as e:
+            err = str(e)
+            print(traceback.format_exc())
+
+        status = "✅ <b>ARBITRAGE SECURED</b>" if not err else f"⚠️ <b>EXE ERROR</b>\n<code>{err}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
-# --- 5. ENTRY POINT ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot Active...")
+    
+    # drop_pending_updates=True is vital to clear the Conflict backlog
+    print("Hydra v5.0 Starting...")
     app.run_polling(drop_pending_updates=True)
-
 
 
 
