@@ -78,28 +78,19 @@ def get_vault():
 vault = get_vault()
 
 def init_clob():
-    """Derived from Docs: Initializes L1 client then derives L2 API credentials."""
     try:
         sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
+        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=funder)
         
-        # Step 1: Initialize with Private Key (L1)
-        client = ClobClient(
-            host="https://clob.polymarket.com", 
-            key=vault.key.hex(), 
-            chain_id=137, 
-            signature_type=sig_type, 
-            funder=funder
-        )
-        
-        # Step 2: Derive L2 Credentials (API Key/Secret/Passphrase)
+        # FIX: Ensure creds are actually generated before setting
         creds = client.create_or_derive_api_creds()
         if creds:
             client.set_api_creds(creds)
             return client
         return None
     except Exception as e:
-        print(f"CLOB Init Error: {e}")
+        print(f"Auth derivation error: {e}")
         return None
 
 # --- 4. ENGINE LOGIC ---
@@ -202,14 +193,14 @@ async def handle_query(update, context):
         err_msg = ""
         try:
             client = init_clob()
-            if not client: raise Exception("Auth Failed: Could not derive API Keys.")
+            # FIX: Explicit check if client is None
+            if not client: raise Exception("Auth Failed: API keys could not be derived.")
             
-            # Fetch market metadata (Needed for tick_size)
-            raw_market = client.get_market(target['condition_id'])
-            if not raw_market: raise Exception("Market metadata unreachable.")
-            market_metadata = Map(raw_market)
+            raw_data = client.get_market(target['condition_id'])
+            if not raw_data: raise Exception("Market data unreachable.")
             
-            # Initialize OrderBuilder
+            market_metadata = Map(raw_data)
+            
             sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
             ob = OrderBuilder(client.get_address(), 137, sig_type)
             ob.funder = os.getenv("FUNDER_ADDRESS", vault.address)
@@ -217,12 +208,10 @@ async def handle_query(update, context):
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                
-                # Use market_metadata for tick size and rounding
                 signed_order = ob.create_order(order_args, market_metadata)
                 
-                resp = client.post_order(signed_order, OrderType.GTC)
-                if isinstance(resp, dict) and resp.get("success") == False:
+                resp = client.post_order(signed_order, OrderType.FOK)
+                if isinstance(resp, dict) and not (resp.get("success") or resp.get("orderID")):
                     err_msg = resp.get("errorMsg") or "Order placement failed."
                     break
         except Exception as e: err_msg = str(e)
@@ -237,7 +226,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
-
 
 
 
