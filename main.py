@@ -25,12 +25,14 @@ ARBI_CACHE = []
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
-LOGO = """<code>█████╗ ██████╗ ███████╗██╗   ██╗
+# Using <pre> and avoiding bare '<' symbols to prevent Telegram HTML parsing errors
+LOGO = """<pre>
+█████╗ ██████╗ ███████╗██╗   ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
 ███████║██████╔╝█████╗   ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-3DAY-LIMIT</code>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-3DAY-STABLE</pre>"""
 
 # --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
@@ -86,7 +88,7 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. ARBITRAGE MATH & FILTERING ---
+# --- 4. ARBITRAGE MATH & 3-DAY FILTER ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
@@ -117,14 +119,13 @@ async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
     
-    # 3-Day Window (72 hours)
-    three_days_sec = 3 * 24 * 60 * 60
+    # Define the 3-day (72 hour) window
+    cutoff_sec = 3 * 24 * 60 * 60
     now_ts = time.time()
-    cutoff_ts = now_ts + three_days_sec
+    limit_ts = now_ts + cutoff_sec
     
-    tags = [1, 10, 100, 4, 6, 237] # Politics, Crypto, Sports, etc.
+    tags = [1, 10, 100, 4, 6, 237]
     for tag in tags:
-        # Increase limit to 40 to account for filtered out long-term bets
         url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}"
         try:
             resp = await asyncio.to_thread(requests.get, url, timeout=5)
@@ -133,16 +134,15 @@ async def scour_arbitrage():
                 if not markets: continue
                 
                 m = markets[0]
-                # FILTER: Only bets ending within 3 days
                 end_date_str = m.get('endDate')
                 if not end_date_str: continue
                 
-                # Parse ISO date (e.g., 2026-03-08T20:00:00Z)
+                # Parse the ISO date and check against our 3-day cutoff
                 end_dt = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
                 end_ts = end_dt.timestamp()
 
-                if end_ts > cutoff_ts:
-                    continue # Skip markets longer than 3 days
+                if end_ts > limit_ts:
+                    continue # Skip markets that take longer than 3 days
 
                 m_data = await fetch_full_market(m['conditionId'])
                 if m_data and 'YES' in m_data and 'NO' in m_data:
@@ -150,7 +150,7 @@ async def scour_arbitrage():
                     if arb:
                         days_left = round((end_ts - now_ts) / (24 * 3600), 1)
                         ARBI_CACHE.append({
-                            "title": f"[{days_left}d] " + e.get('title')[:25],
+                            "title": f"[{max(0, days_left)}d] " + e.get('title')[:25],
                             "yes_id": m_data['YES']['id'],
                             "no_id": m_data['NO']['id'],
                             "p_y": m_data['YES']['price'],
@@ -168,8 +168,17 @@ async def scour_arbitrage():
 # --- 5. BOT HANDLERS ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>\n<i>Filtering for < 3-day settlements.</i>", 
-                                   reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    # We use &lt; instead of < to prevent HTML parsing errors
+    welcome_text = (
+        f"{LOGO}\n"
+        f"<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>\n"
+        f"<i>Filtering for &lt; 3-day settlements.</i>"
+    )
+    await update.message.reply_text(
+        welcome_text, 
+        reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), 
+        parse_mode='HTML'
+    )
 
 async def main_handler(update, context):
     cmd = update.message.text
@@ -179,7 +188,7 @@ async def main_handler(update, context):
             kb = [[InlineKeyboardButton(f"{'🟢' if a['roi'] > 0 else '🟡'} {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
             await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else:
-            await m.edit_text("🛰 <b>NO <3-DAY ARBS DETECTED.</b>")
+            await m.edit_text("🛰 <b>NO &lt; 3-DAY ARBS DETECTED.</b>")
     
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
@@ -240,7 +249,7 @@ async def handle_query(update, context):
             except:
                 results.append(False)
         
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nVerify your balance/approval."
+        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nVerify balance or order limits."
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
@@ -248,7 +257,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot (Short-Term Filter) Active...")
+    print("Hydra Bot (3-Day Limit) Active...")
     app.run_polling()
 
 
