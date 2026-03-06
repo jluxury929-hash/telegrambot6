@@ -15,7 +15,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 # Polymarket SDK Imports
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType, OrderOptions # Added OrderOptions
+# REMOVED: OrderOptions from this line to fix the ImportError
+from py_clob_client.clob_types import OrderArgs, OrderType 
 from py_clob_client.order_builder.constants import BUY
 from py_clob_client.order_builder.builder import OrderBuilder 
 
@@ -197,14 +198,12 @@ async def handle_query(update, context):
             ob.funder = funder_addr
             ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
 
-            # 2. Define empty Options to satisfy the positional argument requirement
-            options = OrderOptions() 
-
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 
-                # FIX: Passing the 'options' argument
-                signed_order = ob.create_order(order_args, options) 
+                # FIX: We pass 'None' as the second argument (options)
+                # This satisfies the requirement for a 2nd positional argument without needing the import
+                signed_order = ob.create_order(order_args, None) 
                 
                 resp = client.post_order(signed_order, OrderType.FOK)
                 
@@ -230,7 +229,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
-
 
 
 
