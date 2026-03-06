@@ -3,8 +3,7 @@ import asyncio
 import json
 import time
 import requests
-import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 from eth_account import Account
@@ -34,7 +33,7 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-FINAL</pre>"""
 
-# --- 2. HYDRA ENGINE ---
+# --- 2. HYDRA ENGINE (RPC RECOVERY) ---
 def get_hydra_w3():
     endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in endpoints:
@@ -159,29 +158,27 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # FIX 1: Explicit Time Sync to fix "Invalid Signature" (Amsterdam drift)
+            # FIX 1: Force Sync with Polymarket Server Time
             time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
             server_ts = int(time_resp.get('timestamp', time.time()))
 
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                
-                # Signing occurs here; using create_order ensures credentials match
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
-                # FIX 2: Handle Integer Response vs Dictionary Response (Stops the 'int' object crash)
+                # FIX 2: Handle Response Type (Int vs Dict)
                 if isinstance(resp, int):
                     if resp not in [200, 201]:
-                        err_msg = f"HTTP Error Code: {resp} (Check .env Signature Type)"
+                        err_msg = f"HTTP Error {resp}: Signature Rejection"
                         break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
-                        err_msg = resp.get("errorMsg") or "Signature/Credential Rejection"
+                        err_msg = resp.get("errorMsg") or "Signature Rejection"
                         break
                 else:
-                    err_msg = "Unexpected API response format"
+                    err_msg = "Unknown response format"
                     break
         except Exception as e: err_msg = str(e)
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
@@ -194,6 +191,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
