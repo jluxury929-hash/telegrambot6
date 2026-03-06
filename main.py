@@ -51,7 +51,7 @@ w3 = get_hydra_w3()
 if not w3:
     print("FATAL: RPC Failure."); import sys; sys.exit(1)
 
-ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}]
+ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}]
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
 # --- 3. VAULT & CLOB AUTH ---
@@ -108,10 +108,13 @@ async def scour_arbitrage():
                 if not m_list: continue
                 m = m_list[0]
                 if not m.get('conditionId'): continue
+                
+                # Filter for short-term only
                 end_dt = datetime.fromisoformat(m['endDate'].replace('Z', '+00:00'))
                 if end_dt.timestamp() > limit_ts: continue
                 
                 m_data = await fetch_full_market(m['conditionId'])
+                # FIX: Check if m_data is None before accessing keys
                 if m_data and 'YES' in m_data and 'NO' in m_data:
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
@@ -143,54 +146,57 @@ async def main_handler(update, context):
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    elif 'FIX APPROVAL' in cmd:
-        tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137})
-        signed = w3.eth.account.sign_transaction(tx, vault.key)
-        w3.eth.send_raw_transaction(signed.raw_transaction)
-        await update.message.reply_text("✅ <b>USDC APPROVED</b>")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 50))
+    
     if "SET_" in q.data:
         context.user_data['stake'] = int(q.data.split("_")[1])
         await q.edit_message_text(f"✅ <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
+        
     elif "ARB_" in q.data:
-        idx = int(q.data.split("_")[1]); target = ARBI_CACHE[idx]
+        idx = int(q.data.split("_")[1])
+        # FIX: Guard against None if cache cleared
+        if idx >= len(ARBI_CACHE):
+            await q.edit_message_text("⚠️ Market data expired. Please re-scan.")
+            return
+        target = ARBI_CACHE[idx]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         msg = f"<b>PLAN:</b> {target['title']}\n📅 <b>Ends:</b> {target['ends']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n💰 ROI: {calc['roi']}%"
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔥 EXECUTE", callback_data=f"EXE_{idx}")]]), parse_mode='HTML')
+        
     elif "EXE_" in q.data:
-        target = ARBI_CACHE[int(q.data.split("_")[1])]
+        idx = int(q.data.split("_")[1])
+        # FIX: Subscripting guard
+        if idx >= len(ARBI_CACHE):
+            await context.bot.send_message(q.message.chat_id, "⚠️ Error: Market no longer in cache.")
+            return
+            
+        target = ARBI_CACHE[idx]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # 1. FIX: Server Time Sync to prevent 'invalid signature'
-            requests.get("https://clob.polymarket.com/time", timeout=5).json()
-            
+            # Sync server time for signature validity
+            requests.get("https://clob.polymarket.com/time", timeout=5)
             local_client = init_clob()
+            
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                
-                # 2. SIGNING: Fresh credential derivation
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
-                # 3. TYPE GUARD: Prevents 'int' object attribute error
+                # Integer/Dict type guard
                 if isinstance(resp, int):
                     if resp not in [200, 201]:
-                        err_msg = f"API Rejection (Code {resp}). Verify .env SIGNATURE_TYPE."
+                        err_msg = f"API Error {resp}: Signature Rejected."
                         break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
                         err_msg = resp.get("errorMsg") or "Invalid Signature"
                         break
-                else:
-                    err_msg = "Unexpected response format"
-                    break
-        except Exception as e: 
-            err_msg = str(e)
-            
+        except Exception as e: err_msg = str(e)
+        
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
@@ -201,6 +207,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
