@@ -17,7 +17,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
-from py_clob_client.order_builder.builder import OrderBuilder  # Added for NegRisk fix
+from py_clob_client.order_builder.builder import OrderBuilder 
 
 # --- 1. CONFIGURATION & ABIs ---
 getcontext().prec = 28
@@ -191,13 +191,16 @@ async def handle_query(update, context):
             requests.get("https://clob.polymarket.com/time", timeout=5)
             client = init_clob()
             
-            # Use OrderBuilder to correctly handle neg_risk contract addressing
-            ob = OrderBuilder(client.get_address(), 137, client.signature_type, target['neg_risk'])
+            # Use local env variable to fix 'ClobClient' object has no attribute 'signature_type'
+            sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
+            
+            # Correctly initialize OrderBuilder for the signature context
+            ob = OrderBuilder(client.get_address(), 137, sig_type, target['neg_risk'])
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 
-                # FIXED: Signature created via Builder to avoid Keyword Error
+                # Create signed order via builder
                 signed_order = ob.create_order(order_args)
                 resp = client.post_order(signed_order, OrderType.FOK)
                 
@@ -226,6 +229,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
