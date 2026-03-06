@@ -34,10 +34,15 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-FINAL</pre>"""
 
-# --- 2. HYDRA ENGINE ---
+# --- 2. HYDRA ENGINE (RPC FIX) ---
 def get_hydra_w3():
-    # FIXED: Added more reliable fallbacks to prevent FATAL RPC Failure
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://rpc-mainnet.maticvigil.com", "https://1rpc.io/matic"]
+    # Added backup endpoints to prevent the "FATAL: RPC Failure" loop
+    endpoints = [
+        os.getenv("RPC_URL"), 
+        "https://polygon-rpc.com", 
+        "https://rpc-mainnet.maticvigil.com", 
+        "https://1rpc.io/matic"
+    ]
     for url in endpoints:
         if not url: continue
         try:
@@ -50,7 +55,7 @@ def get_hydra_w3():
 
 w3 = get_hydra_w3()
 if not w3:
-    print("FATAL: RPC Failure."); import sys; sys.exit(1)
+    print("FATAL: RPC Failure. Check your internet or RPC_URL in .env"); import sys; sys.exit(1)
 
 ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}]
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
@@ -160,44 +165,43 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # FIXED: Forced Server-Time Sync to solve Amsterdam clock drift
+            # SYNC: Fetch server time to prevent Amsterdam signature drift
             time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
             server_ts = int(time_resp.get('timestamp', time.time()))
 
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
-                # FIXED: Injected expiration/timestamp logic to appease signature verification
-                order_args = OrderArgs(
-                    token_id=str(t_id), 
-                    price=0.99, 
-                    size=float(amt), 
-                    side=BUY
-                )
+                order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 
+                # Signing occurs inside create_order
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
+                # FIX: Handle Integer Response vs Dictionary Response (Stops the 'int' object crash)
                 if isinstance(resp, int):
                     if resp not in [200, 201]:
-                        err_msg = f"HTTP Error: {resp}"
+                        err_msg = f"HTTP Error Code: {resp}"
                         break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
                         err_msg = resp.get("errorMsg") or "Signature rejection"
                         break
                 else:
-                    err_msg = "Unknown response format"
+                    err_msg = "Unexpected API response format"
                     break
         except Exception as e: err_msg = str(e)
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
+    # drop_pending_updates=True helps clear the "Conflict" error on restart
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-    app.add_handler(CommandHandler("start", start)); app.add_handler(CallbackQueryHandler(handle_query))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
