@@ -34,7 +34,7 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-FINAL</pre>"""
 
-# --- 2. HYDRA ENGINE (RPC RECOVERY) ---
+# --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
     endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in endpoints:
@@ -65,18 +65,9 @@ vault = get_vault()
 
 def init_clob():
     try:
-        # 0 = Private Key (EOA), 1 = Polymarket Proxy, 2 = API Proxy
         sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
-        
-        client = ClobClient(
-            host="https://clob.polymarket.com", 
-            key=vault.key.hex(), 
-            chain_id=137, 
-            signature_type=sig_type, 
-            funder=funder
-        )
-        # Ensure fresh API credentials are set
+        client = ClobClient(host="https://clob.polymarket.com", key=vault.key.hex(), chain_id=137, signature_type=sig_type, funder=funder)
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except Exception as e:
@@ -168,49 +159,42 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # 1. FIX: Fetch server time to resolve Amsterdam clock drift
+            # FIX 1: Explicit Time Sync to fix "Invalid Signature" (Amsterdam drift)
             time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
-            server_time = int(time_resp.get("timestamp", time.time()))
-            
+            server_ts = int(time_resp.get('timestamp', time.time()))
+
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
-                # 2. FIX: Explicit typing for OrderArgs
-                order_args = OrderArgs(
-                    token_id=str(t_id),
-                    price=0.99,
-                    size=float(amt),
-                    side=BUY
-                )
+                order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 
-                # Create and Post Order
+                # Signing occurs here; using create_order ensures credentials match
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
-                # 3. FIX: Check if response is an 'int' (HTTP code) or 'dict' (JSON)
+                # FIX 2: Handle Integer Response vs Dictionary Response (Stops the 'int' object crash)
                 if isinstance(resp, int):
                     if resp not in [200, 201]:
-                        err_msg = f"HTTP Error {resp}: Likely signature mismatch."
+                        err_msg = f"HTTP Error Code: {resp} (Check .env Signature Type)"
                         break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
-                        err_msg = resp.get("errorMsg") or "Order Failed"
+                        err_msg = resp.get("errorMsg") or "Signature/Credential Rejection"
                         break
                 else:
-                    err_msg = "Unexpected response type"
+                    err_msg = "Unexpected API response format"
                     break
-
         except Exception as e: err_msg = str(e)
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
-    # drop_pending_updates=True prevents the 'Conflict' error on restart
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
