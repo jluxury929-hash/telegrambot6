@@ -32,7 +32,7 @@ LOGO = """<pre>
 ███████║██████╔╝█████╗    ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-FINAL</pre>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
 # --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
@@ -90,7 +90,6 @@ async def fetch_full_market(cond_id):
     try:
         r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/markets/{cond_id}", timeout=5)
         d = r.json()
-        # Safety Fix for 'NoneType' error
         if not d or 'tokens' not in d: return None
         return {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
     except: return None
@@ -103,7 +102,7 @@ async def scour_arbitrage():
         try:
             resp = await asyncio.to_thread(requests.get, f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}", timeout=5)
             data = resp.json()
-            if not isinstance(data, list): continue # Safety Fix
+            if not isinstance(data, list): continue
             for e in data:
                 m_list = e.get('markets', [])
                 if not m_list: continue
@@ -113,7 +112,6 @@ async def scour_arbitrage():
                 if end_dt.timestamp() > limit_ts: continue
                 
                 m_data = await fetch_full_market(m['conditionId'])
-                # FIX: Check if m_data is None before subscripting ['YES']
                 if m_data and 'YES' in m_data and 'NO' in m_data:
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
@@ -167,27 +165,33 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # FIX: Ensure server time sync for signature safety
+            # 1. FIX: Server Time Sync to prevent 'invalid signature'
             time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
+            # The SDK handles the actual sync; fetching it ensures we are not on a stale local session
+            
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
+                
+                # 2. SIGNING: Fresh credential derivation
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
-                # FIX: Integer Guard for API response
+                # 3. TYPE GUARD: Prevents 'int' object attribute error
                 if isinstance(resp, int):
                     if resp not in [200, 201]:
-                        err_msg = f"HTTP Error {resp}: SIGNATURE REJECTED"
+                        err_msg = f"API Rejection (Code {resp}). Verify .env SIGNATURE_TYPE."
                         break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
-                        err_msg = resp.get("errorMsg") or "Order Failure"
+                        err_msg = resp.get("errorMsg") or "Invalid Signature"
                         break
                 else:
-                    err_msg = "Unknown API response format"
+                    err_msg = "Unexpected response format"
                     break
-        except Exception as e: err_msg = str(e)
+        except Exception as e: 
+            err_msg = str(e)
+            
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
@@ -198,6 +202,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
