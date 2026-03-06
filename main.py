@@ -192,15 +192,12 @@ async def handle_query(update, context):
             sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
             funder_addr = os.getenv("FUNDER_ADDRESS", vault.address)
             
-            # Use exactly 4 positional arguments to satisfy the SDK's constructor
-            ob = OrderBuilder(client.get_address(), 137, sig_type, funder_addr)
+            # Use only 3 positional arguments to avoid "takes from 2 to 4" error
+            ob = OrderBuilder(client.get_address(), 137, sig_type)
             
-            # Manually switch the exchange address if market is Negative Risk
-            # This avoids adding a 5th positional argument that crashes the code
-            if target['neg_risk']:
-                ob.contract_address = NEG_RISK_EXCHANGE
-            else:
-                ob.contract_address = CTF_EXCHANGE
+            # Manually inject funder and contract address to avoid constructor crash
+            ob.funder = funder_addr
+            ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
@@ -229,8 +226,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
-
-
 
 
 
