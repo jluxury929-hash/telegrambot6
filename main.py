@@ -90,6 +90,8 @@ async def fetch_full_market(cond_id):
     try:
         r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/markets/{cond_id}", timeout=5)
         d = r.json()
+        # Safety Fix for 'NoneType' error
+        if not d or 'tokens' not in d: return None
         return {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
     except: return None
 
@@ -100,12 +102,18 @@ async def scour_arbitrage():
     for tag in [1, 10, 100, 4, 6, 237]:
         try:
             resp = await asyncio.to_thread(requests.get, f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}", timeout=5)
-            for e in resp.json():
-                m = e.get('markets', [{}])[0]
+            data = resp.json()
+            if not isinstance(data, list): continue # Safety Fix
+            for e in data:
+                m_list = e.get('markets', [])
+                if not m_list: continue
+                m = m_list[0]
                 if not m.get('conditionId'): continue
                 end_dt = datetime.fromisoformat(m['endDate'].replace('Z', '+00:00'))
                 if end_dt.timestamp() > limit_ts: continue
+                
                 m_data = await fetch_full_market(m['conditionId'])
+                # FIX: Check if m_data is None before subscripting ['YES']
                 if m_data and 'YES' in m_data and 'NO' in m_data:
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
@@ -159,25 +167,27 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # Refresh server time for sync
-            requests.get("https://clob.polymarket.com/time", timeout=5).json()
+            # FIX: Ensure server time sync for signature safety
+            time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
             local_client = init_clob()
-            
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
-                # Fix for 'int' object attribute error
+                # FIX: Integer Guard for API response
                 if isinstance(resp, int):
-                    err_msg = f"HTTP Error {resp}. Likely SIGNATURE_TYPE mismatch."
-                    break
+                    if resp not in [200, 201]:
+                        err_msg = f"HTTP Error {resp}: SIGNATURE REJECTED"
+                        break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
-                        err_msg = resp.get("errorMsg") or "Invalid Signature"
+                        err_msg = resp.get("errorMsg") or "Order Failure"
                         break
+                else:
+                    err_msg = "Unknown API response format"
+                    break
         except Exception as e: err_msg = str(e)
-        
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
@@ -188,9 +198,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
-
-
-
 
 
 
