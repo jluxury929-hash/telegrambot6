@@ -17,6 +17,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
+from py_clob_client.order_builder.builder import OrderBuilder  # Added for NegRisk fix
 
 # --- 1. CONFIGURATION & ABIs ---
 getcontext().prec = 28
@@ -190,22 +191,14 @@ async def handle_query(update, context):
             requests.get("https://clob.polymarket.com/time", timeout=5)
             client = init_clob()
             
+            # Use OrderBuilder to correctly handle neg_risk contract addressing
+            ob = OrderBuilder(client.get_address(), 137, client.signature_type, target['neg_risk'])
+
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 
-                # FIXED: Instead of passing neg_risk as a keyword (which crashes), 
-                # we use the SDK's internal order builder which correctly handles the target contract.
-                signed_order = client.create_order(order_args)
-                
-                # If the signature fails for Neg-Risk specifically, we retry with the explicit builder
-                if target['neg_risk']:
-                    try:
-                        # Manual builder override for Negative Risk signature verification
-                        from py_clob_client.order_builder.builder import OrderBuilder
-                        ob = OrderBuilder(client.get_address(), 137, client.signature_type, target['neg_risk'])
-                        signed_order = ob.create_order(order_args)
-                    except: pass
-
+                # FIXED: Signature created via Builder to avoid Keyword Error
+                signed_order = ob.create_order(order_args)
                 resp = client.post_order(signed_order, OrderType.FOK)
                 
                 if isinstance(resp, int):
@@ -233,6 +226,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
