@@ -21,8 +21,7 @@ from py_clob_client.order_builder.builder import OrderBuilder
 
 # --- 0. UTILITY ---
 class Map(dict):
-    """Guarantees dot-notation access even if keys are missing"""
-    def __getattr__(self, name): return self.get(name, "0.01") # Default tick size to 0.01
+    def __getattr__(self, name): return self.get(name)
 
 # --- 1. CONFIGURATION ---
 getcontext().prec = 28
@@ -32,10 +31,9 @@ ARBI_CACHE = []
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 NEG_RISK_EXCHANGE = Web3.to_checksum_address("0xC5d563A36AE78145C45a50134d48A1215220f80a")
-
 ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}]
 
-# --- 2. VAULT & AUTHENTICATION (The Guarantee) ---
+# --- 2. VAULT & AUTHENTICATION ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -45,14 +43,9 @@ def get_vault():
 vault = get_vault()
 
 def init_clob():
-    """
-    GUARANTEED AUTH: This derived the L2 credentials required for trading.
-    If this returns None, your IP is blocked or your Private Key is invalid.
-    """
+    """Initializes the Polymarket CLOB Client with L2 API Credentials."""
     try:
         if not vault: return None
-        
-        # Initialize L1 Client
         client = ClobClient(
             host="https://clob.polymarket.com", 
             key=vault.key.hex(), 
@@ -60,21 +53,13 @@ def init_clob():
             signature_type=int(os.getenv("SIGNATURE_TYPE", 1)), 
             funder=os.getenv("FUNDER_ADDRESS", vault.address)
         )
-        
-        # Step 2: Create/Derive L2 Keys (Required for POSTing orders)
+        # Derive API Keys (L2 Auth)
         creds = client.create_or_derive_api_creds()
-        
         if creds:
             client.set_api_creds(creds)
             return client
-        
-        # If we reach here, creds are None. 
-        # DIAGNOSTIC: Polymarket API returns None if the region is restricted.
-        print("CRITICAL: API Credentials returned None. Check Region/VPN.")
-        return None
-    except Exception as e:
-        print(f"Auth Error: {e}")
-        return None
+        return None 
+    except: return None
 
 # --- 3. ENGINE LOGIC ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
@@ -124,9 +109,19 @@ async def main_handler(update, context):
         w3 = Web3(Web3.HTTPProvider(os.getenv("RPC_URL", "https://polygon-rpc.com")))
         bal = w3.eth.contract(address=USDC_E, abi=ERC20_ABI).functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+    elif 'CALIBRATE' in cmd:
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
+        await update.message.reply_text("🎯 <b>SELECT STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
+    
+    # --- FIX: CALIBRATE BUTTON HANDLER ---
+    if "SET_" in q.data:
+        context.user_data['stake'] = int(q.data.split("_")[1])
+        await q.edit_message_text(f"✅ <b>CAPITAL SET TO: ${context.user_data['stake']}</b>")
+        return
+
     stake = float(context.user_data.get('stake', 5))
     
     if "ARB_" in q.data:
@@ -139,16 +134,15 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # 1. Initialize Client
             client = init_clob()
-            if not client: raise Exception("Auth Failed: API Credentials are None. Use a Proxy/VPN.")
+            # --- FIX: GURANTEED TYPE CHECK ---
+            if client is None:
+                raise Exception("Auth Failed: API Credentials are None. Check Region/VPN.")
             
-            # 2. Get Market Meta with Fallback
             raw_m = client.get_market(target['condition_id'])
             if not raw_m: raise Exception("Market Meta is None.")
             m_meta = Map(raw_m)
             
-            # 3. Build & Sign
             ob = OrderBuilder(client.get_address(), 137, int(os.getenv("SIGNATURE_TYPE", 1)))
             ob.funder = os.getenv("FUNDER_ADDRESS", vault.address)
             ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
@@ -167,6 +161,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start)); app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling(drop_pending_updates=True)
+
 
 
 
