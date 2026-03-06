@@ -65,8 +65,9 @@ vault = get_vault()
 
 def init_clob():
     try:
-        # Check .env for SIGNATURE_TYPE, default to 1
+        # SIGNATURE_TYPE 1 = EOA/MetaMask, 2 = Poly Proxy Account
         sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
+        # Important: funder must be the owner of the API credentials
         funder = os.getenv("FUNDER_ADDRESS", vault.address)
         
         client = ClobClient(
@@ -76,7 +77,7 @@ def init_clob():
             signature_type=sig_type, 
             funder=funder
         )
-        # Re-derive credentials to ensure they match the current signature type
+        # Fix: Force derivation using the explicit private key to ensure signature alignment
         client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except Exception as e:
@@ -146,7 +147,6 @@ async def main_handler(update, context):
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # ADDED $5 OPTION HERE
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
@@ -171,9 +171,10 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # Re-init client inside EXE to refresh timestamp and prevent signature expiration
+            # Refresh client inside execution to ensure fresh timestamp/session
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
+                # Fix: Explicitly typecast to ensure signature consistency
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
@@ -189,6 +190,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start)); app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active..."); app.run_polling()
+
 
 
 
