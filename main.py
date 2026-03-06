@@ -15,9 +15,15 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 # Polymarket SDK Imports
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType 
+from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 from py_clob_client.order_builder.builder import OrderBuilder 
+
+# --- 0. UTILITY: Convert Dict to Object for SDK Compatibility ---
+class Map(dict):
+    """Minimal class to allow dot-notation access: market.tick_size"""
+    def __getattr__(self, name):
+        return self.get(name)
 
 # --- 1. CONFIGURATION & ABIs ---
 getcontext().prec = 28
@@ -28,7 +34,10 @@ USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 NEG_RISK_EXCHANGE = Web3.to_checksum_address("0xC5d563A36AE78145C45a50134d48A1215220f80a")
 
-ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}, {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}]
+ERC20_ABI = [
+    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
+    {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}
+]
 
 LOGO = """<pre>
 █████╗ ██████╗ ███████╗██╗   ██╗
@@ -38,12 +47,12 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
-# --- 2. BLOCKCHAIN CONNECTION (RPC RECOVERY) ---
+# --- 2. BLOCKCHAIN CONNECTION ---
 def get_hydra_w3():
     raw_url = os.getenv("RPC_URL", "").strip()
-    endpoints = [raw_url, "https://polygon-rpc.com", "https://1rpc.io/matic", "https://rpc-mainnet.maticvigil.com"]
+    endpoints = [raw_url, "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in endpoints:
-        if not url or len(url) < 10: continue
+        if not url: continue
         try:
             _w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 15}))
             if _w3.is_connected():
@@ -108,17 +117,19 @@ async def scour_arbitrage():
             resp = await asyncio.to_thread(requests.get, f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}", timeout=5)
             data = resp.json()
             for e in data:
-                m = e.get('markets', [{}])[0]
+                m_list = e.get('markets', [])
+                if not m_list: continue
+                m = m_list[0]
                 if not m.get('conditionId'): continue
                 end_dt = datetime.fromisoformat(m['endDate'].replace('Z', '+00:00'))
                 if end_dt.timestamp() > limit_ts: continue
                 m_data = await fetch_full_market(m['conditionId'])
-                if m_data and 'YES' in m_data['tokens']:
+                if m_data and 'YES' in m_data['tokens'] and 'NO' in m_data['tokens']:
                     arb = calculate_arbitrage_guaranteed(m_data['tokens']['YES']['price'], m_data['tokens']['NO']['price'], 100.0)
                     if arb:
                         ARBI_CACHE.append({
                             "title": f"[{round((end_dt.timestamp()-time.time())/86400, 1)}d] " + e.get('title')[:25], 
-                            "condition_id": m['conditionId'],
+                            "condition_id": m['conditionId'], 
                             "yes_id": m_data['tokens']['YES']['id'], 
                             "no_id": m_data['tokens']['NO']['id'], 
                             "p_y": m_data['tokens']['YES']['price'], 
@@ -177,24 +188,30 @@ async def handle_query(update, context):
             client = init_clob()
             if not client: raise Exception("Auth Failed")
             
-            # CRITICAL FIX: Get market metadata to satisfy tick_size requirement
-            market_metadata = client.get_market(target['condition_id'])
+            # 1. Fetch market data as dict
+            raw_data = client.get_market(target['condition_id'])
+            # 2. Convert to Map object so SDK can access .tick_size
+            market_metadata = Map(raw_data)
             
-            ob = OrderBuilder(client.get_address(), 137, int(os.getenv("SIGNATURE_TYPE", 1)))
+            sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
+            ob = OrderBuilder(client.get_address(), 137, sig_type)
             ob.funder = os.getenv("FUNDER_ADDRESS", vault.address)
             ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                # Pass market_metadata as the 2nd positional argument
-                signed_order = ob.create_order(order_args, market_metadata) 
-                client.post_order(signed_order, OrderType.FOK)
+                # Pass the Map object as the required 2nd argument
+                signed_order = ob.create_order(order_args, market_metadata)
+                
+                resp = client.post_order(signed_order, OrderType.FOK)
+                if isinstance(resp, dict) and not (resp.get("success") or resp.get("orderID")):
+                    err_msg = resp.get("errorMsg") or "Order placement failed."
+                    break
         except Exception as e: err_msg = str(e)
         
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
-# --- 6. START BOT ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
@@ -202,6 +219,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
