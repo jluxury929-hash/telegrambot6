@@ -21,7 +21,6 @@ getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 
-# ADDRESSES
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
@@ -78,7 +77,7 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. ARBITRAGE MATH & 3-DAY FILTER ---
+# --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
@@ -130,7 +129,7 @@ async def scour_arbitrage():
 # --- 5. BOT HANDLERS ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN', '📊 CALIBRATE'], ['💳 VAULT', '🔧 FIX APPROVAL']]
-    welcome_text = (f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>\n<i>Filtering for &lt; 3-day settlements.</i>")
+    welcome_text = (f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>")
     await update.message.reply_text(welcome_text, reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
@@ -140,16 +139,16 @@ async def main_handler(update, context):
         if await scour_arbitrage():
             kb = [[InlineKeyboardButton(f"{'🟢' if a['roi'] > 0 else '🟡'} {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
             await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("🛰 <b>NO &lt; 3-DAY ARBS DETECTED.</b>")
+        else: await m.edit_text("🛰 <b>NO ARBS DETECTED.</b>")
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
         try:
-            msg = await update.message.reply_text("⌛ <b>SENDING APPROVAL...</b>", parse_mode='HTML')
+            msg = await update.message.reply_text("⌛ <b>SENDING...</b>", parse_mode='HTML')
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137})
             signed = w3.eth.account.sign_transaction(tx, vault.key)
             w3.eth.send_raw_transaction(getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None)))
@@ -172,15 +171,14 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         
-        # --- EXECUTION LOOP ---
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # FIX: Set price=0.99 to act as a max-cap for the market order
-                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
+                expiry = int(time.time() + 120)
+                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY, expiration=expiry)
                 
-                # FIX: Inject 'size' attribute to satisfy the SDK internal requirements
-                if not hasattr(order_args, 'size'):
-                    setattr(order_args, 'size', float(amt))
+                # Attribute patching for SDK consistency
+                if not hasattr(order_args, 'size'): setattr(order_args, 'size', float(amt))
+                if not hasattr(order_args, 'expiration'): setattr(order_args, 'expiration', expiry)
 
                 created_order = clob_client.create_order(order_args)
                 resp = clob_client.post_order(created_order)
@@ -200,8 +198,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot (3-Day Limit) Active...")
+    print("Hydra Bot Active...")
     app.run_polling()
+
 
 
 
