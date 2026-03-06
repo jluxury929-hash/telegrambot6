@@ -77,7 +77,7 @@ def init_clob():
         print(f"Auth derivation failed: {e}")
         return None
 
-# --- 4. ENGINE LOGIC (Scanners & Math) ---
+# --- 4. ENGINE LOGIC ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
@@ -114,10 +114,8 @@ async def scour_arbitrage():
                 if not m_list: continue
                 m = m_list[0]
                 if not m.get('conditionId'): continue
-                
                 end_dt = datetime.fromisoformat(m['endDate'].replace('Z', '+00:00'))
                 if end_dt.timestamp() > limit_ts: continue
-                
                 m_data = await fetch_full_market(m['conditionId'])
                 if m_data and 'YES' in m_data['tokens'] and 'NO' in m_data['tokens']:
                     arb = calculate_arbitrage_guaranteed(m_data['tokens']['YES']['price'], m_data['tokens']['NO']['price'], 100.0)
@@ -194,11 +192,15 @@ async def handle_query(update, context):
             sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
             funder_addr = os.getenv("FUNDER_ADDRESS", vault.address)
             
-            # FIX: Only 4 positional arguments, funder is the last one.
+            # Use exactly 4 positional arguments to satisfy the SDK's constructor
             ob = OrderBuilder(client.get_address(), 137, sig_type, funder_addr)
             
-            # Manually set the contract address based on market type for hashing
-            ob.contract_address = NEG_RISK_EXCHANGE if target['neg_risk'] else CTF_EXCHANGE
+            # Manually switch the exchange address if market is Negative Risk
+            # This avoids adding a 5th positional argument that crashes the code
+            if target['neg_risk']:
+                ob.contract_address = NEG_RISK_EXCHANGE
+            else:
+                ob.contract_address = CTF_EXCHANGE
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
@@ -211,7 +213,7 @@ async def handle_query(update, context):
                         break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
-                        err_msg = resp.get("errorMsg") or "Invalid Signature"
+                        err_msg = resp.get("errorMsg") or "Order placement failed."
                         break
 
         except Exception as e: err_msg = str(e)
@@ -227,7 +229,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
-
 
 
 
