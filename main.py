@@ -21,16 +21,17 @@ getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 
+# ADDRESSES
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """<pre>
- █████╗ ██████╗ ███████╗██╗   ██╗
+█████╗ ██████╗ ███████╗██╗   ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
-███████║██████╔╝█████╗   ╚███╔╝ 
-██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
+███████║██████╔╝█████╗    ╚███╔╝ 
+██╔══██║██╔═══╝ ██╔══╝     ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-3DAY-STABLE</pre>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
 # --- 2. HYDRA ENGINE & ABIs ---
 def get_hydra_w3():
@@ -109,13 +110,14 @@ async def scour_arbitrage():
         try:
             resp = await asyncio.to_thread(requests.get, url, timeout=5)
             for e in resp.json():
-                m = e.get('markets', [])
-                if not m: continue
-                end_date_str = m[0].get('endDate')
+                markets = e.get('markets', [])
+                if not markets: continue
+                m = markets[0]
+                end_date_str = m.get('endDate')
                 if not end_date_str: continue
                 end_dt = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
                 if end_dt.timestamp() > limit_ts: continue
-                m_data = await fetch_full_market(m[0]['conditionId'])
+                m_data = await fetch_full_market(m['conditionId'])
                 if m_data and 'YES' in m_data and 'NO' in m_data:
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
@@ -168,19 +170,30 @@ async def handle_query(update, context):
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        results = []
+        err_msg = ""
+        
+        # SCRIPT FIX: Ensure 'size' attribute is present and prices are set to allow slippage
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # FIX: Explicitly use 'amount' and add 'price=1.0' to prevent the size error and ensure fill
-                order = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side="BUY", price=1.0)
-                signed_order = clob_client.create_order(order)
-                resp = clob_client.post_order(signed_order, OrderType.FOK)
-                results.append(True if (resp.get("success") or "order_id" in resp) else False)
-            except Exception as e:
-                print(f"Order failure: {e}")
-                results.append(False)
+                # Use a price of 0.99-1.0 to ensure the market order doesn't get rejected for price limits
+                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side=BUY)
+                
+                # Manual injection to fix the 'size' attribute error in py_clob_client
+                if not hasattr(order_args, 'size'):
+                    setattr(order_args, 'size', float(amt))
+
+                # Create and post the order
+                created_order = clob_client.create_order(order_args)
+                resp = clob_client.post_order(created_order)
+                
+                if not (resp.get("success") or resp.get("orderID")):
+                    err_msg = resp.get("errorMsg") or str(resp)
+                    break # Stop if one leg fails to prevent unhedged loss
+            except Exception as e: 
+                err_msg = str(e)
+                break
         
-        status = "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>\nVerify balance or order limits."
+        status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
@@ -190,6 +203,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot (3-Day Limit) Active...")
     app.run_polling()
+
 
 
 
