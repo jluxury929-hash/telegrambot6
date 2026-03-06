@@ -190,17 +190,13 @@ async def handle_query(update, context):
             # SYNC: Polymarket Server Time Refresh
             requests.get("https://clob.polymarket.com/time", timeout=5)
             client = init_clob()
-            
-            # Use local env variable to fix 'ClobClient' object has no attribute 'signature_type'
             sig_type = int(os.getenv("SIGNATURE_TYPE", 1))
             
-            # Correctly initialize OrderBuilder for the signature context
-            ob = OrderBuilder(client.get_address(), 137, sig_type, target['neg_risk'])
+            # FIX: Explicitly using keyword for neg_risk to avoid positional argument error
+            ob = OrderBuilder(client.get_address(), 137, sig_type, neg_risk=target['neg_risk'])
 
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                
-                # Create signed order via builder
                 signed_order = ob.create_order(order_args)
                 resp = client.post_order(signed_order, OrderType.FOK)
                 
@@ -229,6 +225,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
