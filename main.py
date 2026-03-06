@@ -172,23 +172,22 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         
-        # SCRIPT FIX: Ensure 'size' attribute is present and prices are set to allow slippage
+        # --- EXECUTION LOOP ---
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # Use a price of 0.99-1.0 to ensure the market order doesn't get rejected for price limits
-                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), side=BUY)
+                # FIX: Set price=0.99 to act as a max-cap for the market order
+                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
                 
-                # Manual injection to fix the 'size' attribute error in py_clob_client
+                # FIX: Inject 'size' attribute to satisfy the SDK internal requirements
                 if not hasattr(order_args, 'size'):
                     setattr(order_args, 'size', float(amt))
 
-                # Create and post the order
                 created_order = clob_client.create_order(order_args)
                 resp = clob_client.post_order(created_order)
                 
                 if not (resp.get("success") or resp.get("orderID")):
                     err_msg = resp.get("errorMsg") or str(resp)
-                    break # Stop if one leg fails to prevent unhedged loss
+                    break 
             except Exception as e: 
                 err_msg = str(e)
                 break
@@ -203,6 +202,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot (3-Day Limit) Active...")
     app.run_polling()
+
 
 
 
