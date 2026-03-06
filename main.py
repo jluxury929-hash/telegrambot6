@@ -159,7 +159,7 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # FIX: Explicit Time Sync to resolve "Invalid Signature"
+            # FIX: Forced Time Sync with Polymarket Server
             time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
             server_ts = int(time_resp.get('timestamp', time.time()))
 
@@ -167,11 +167,12 @@ async def handle_query(update, context):
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
                 
-                # Signing ensures fresh credentials
+                # Signing ensures fresh credentials and server-side alignment
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
-                # FIX: Type check response to prevent 'int' object attribute error
+                # --- FIX: ROBUST TYPE CHECKING ---
+                # This prevents the 'int' object attribute error by checking if resp is an integer first
                 if isinstance(resp, int):
                     if resp not in [200, 201]:
                         err_msg = f"HTTP Error {resp}: Signature mismatch."
@@ -181,9 +182,11 @@ async def handle_query(update, context):
                         err_msg = resp.get("errorMsg") or "Signature/Credential Rejection"
                         break
                 else:
-                    err_msg = "Unexpected response type"
+                    err_msg = "Unexpected API response type"
                     break
-        except Exception as e: err_msg = str(e)
+        except Exception as e: 
+            err_msg = str(e)
+            
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
@@ -194,9 +197,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
-
-
-
 
 
 
