@@ -32,13 +32,19 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
-# --- 2. HYDRA ENGINE & ABIs ---
+# --- 2. HYDRA ENGINE (FIXED RPC) ---
 def get_hydra_w3():
-    endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
+    endpoints = [
+        os.getenv("RPC_URL"), 
+        "https://polygon.llamarpc.com",
+        "https://rpc.ankr.com/polygon",
+        "https://1rpc.io/matic",
+        "https://polygon-rpc.com"
+    ]
     for url in endpoints:
         if not url: continue
         try:
-            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 10}))
+            _w3 = Web3(Web3.HTTPProvider(url.strip(), request_kwargs={'timeout': 20}))
             if _w3.is_connected():
                 _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 return _w3
@@ -47,7 +53,7 @@ def get_hydra_w3():
 
 w3 = get_hydra_w3()
 if not w3:
-    print("FATAL: RPC Failure."); import sys; sys.exit(1)
+    print("FATAL: RPC Failure. All nodes are unreachable."); import sys; sys.exit(1)
 
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
@@ -141,8 +147,10 @@ async def main_handler(update, context):
             await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("🛰 <b>NO ARBS DETECTED.</b>")
     elif 'VAULT' in cmd:
-        bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        try:
+            bal = usdc_e_contract.functions.balanceOf(vault.address).call()
+            await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+        except: await update.message.reply_text("❌ <b>RPC Error fetching balance.</b>")
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -172,28 +180,17 @@ async def handle_query(update, context):
         err_msg = ""
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # FIXED: Fetch the full market object from the SDK
+                # FIXED: Fetch full market object for tick_size validation
                 market = clob_client.get_market(t_id)
-                
-                order_args = OrderArgs(
-                    token_id=str(t_id),
-                    price=0.99,
-                    size=float(amt),
-                    side=BUY,
-                    expiration=0
-                )
-                
-                # FIXED: Pass market object as first param
+                order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY, expiration=0)
                 created_order = clob_client.create_order(market, order_args, OrderType.FOK)
                 resp = clob_client.post_order(created_order)
-                
                 if not (resp.get("success") or resp.get("orderID")):
                     err_msg = resp.get("errorMsg") or str(resp)
                     break 
             except Exception as e: 
                 err_msg = str(e)
                 break
-        
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
@@ -202,8 +199,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot Active...")
+    print("Hydra Bot Active (Enhanced RPC mode)...")
     app.run_polling()
+
 
 
 
