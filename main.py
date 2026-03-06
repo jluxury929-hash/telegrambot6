@@ -13,7 +13,7 @@ from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
+from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
 # --- 1. CORE CONFIG ---
@@ -151,7 +151,7 @@ async def main_handler(update, context):
             msg = await update.message.reply_text("⌛ <b>SENDING...</b>", parse_mode='HTML')
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137})
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            w3.eth.send_raw_transaction(getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None)))
+            w3.eth.send_raw_transaction(signed.raw_transaction)
             await msg.edit_text("✅ <b>USDC APPROVED</b>")
         except Exception as e: await update.message.reply_text(f"❌ <b>FAILED</b>: {e}")
 
@@ -172,12 +172,18 @@ async def handle_query(update, context):
         err_msg = ""
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
+                # FIX: Use OrderArgs with OrderType.FOK for valid signing and execution
+                # price=0.99 ensures market fill; expiration=0 is required for FOK
+                order_args = OrderArgs(
+                    token_id=str(t_id),
+                    price=0.99,
+                    size=float(amt),
+                    side=BUY,
+                    order_type=OrderType.FOK,
+                    expiration=0
+                )
                 
-                # FIXED: expiration must be 0 for market/FOK orders to avoid the invalid value error
-                setattr(order_args, 'size', float(amt))
-                setattr(order_args, 'expiration', 0) 
-
+                # Create and post directly to ensure the SDK signs all fields correctly
                 created_order = clob_client.create_order(order_args)
                 resp = clob_client.post_order(created_order)
                 
@@ -198,6 +204,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling()
+
 
 
 
