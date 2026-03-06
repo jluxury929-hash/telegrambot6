@@ -32,7 +32,7 @@ LOGO = """<pre>
 ███████║██████╔╝█████╗    ╚███╔╝ 
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗ 
 ██║  ██║██║     ███████╗██╔╝ ██╗
-╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-FINAL</pre>"""
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
 # --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
@@ -159,28 +159,31 @@ async def handle_query(update, context):
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
         try:
-            # Refresh client session
+            # FIX: Explicit Time Sync to resolve "Invalid Signature"
+            time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
+            server_ts = int(time_resp.get('timestamp', time.time()))
+
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
+                
+                # Signing ensures fresh credentials
                 signed_order = local_client.create_order(order_args)
                 resp = local_client.post_order(signed_order, OrderType.FOK)
                 
-                # --- MINIMAL CHANGE FIX ---
-                # Check if resp is an integer (HTTP Error) or a dictionary (Success/Logic error)
+                # FIX: Type check response to prevent 'int' object attribute error
                 if isinstance(resp, int):
-                    err_msg = f"HTTP {resp}: Signature mismatch or Balance issue."
-                    break
+                    if resp not in [200, 201]:
+                        err_msg = f"HTTP Error {resp}: Signature mismatch."
+                        break
                 elif isinstance(resp, dict):
                     if not (resp.get("success") or resp.get("orderID")):
-                        err_msg = resp.get("errorMsg") or "Order Rejection"
+                        err_msg = resp.get("errorMsg") or "Signature/Credential Rejection"
                         break
                 else:
-                    err_msg = "Unexpected API response"
+                    err_msg = "Unexpected response type"
                     break
-        except Exception as e: 
-            err_msg = str(e)
-        
+        except Exception as e: err_msg = str(e)
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
@@ -191,6 +194,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
