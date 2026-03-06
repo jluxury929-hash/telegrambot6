@@ -172,7 +172,9 @@ async def handle_query(update, context):
         err_msg = ""
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # FIXED: order_type moved out of constructor
+                # FIXED: Fetch the full market object from the SDK
+                market = clob_client.get_market(t_id)
+                
                 order_args = OrderArgs(
                     token_id=str(t_id),
                     price=0.99,
@@ -181,8 +183,8 @@ async def handle_query(update, context):
                     expiration=0
                 )
                 
-                # FIXED: Pass OrderType.FOK as a positional argument
-                created_order = clob_client.create_order(order_args, OrderType.FOK)
+                # FIXED: Pass market object as first param
+                created_order = clob_client.create_order(market, order_args, OrderType.FOK)
                 resp = clob_client.post_order(created_order)
                 
                 if not (resp.get("success") or resp.get("orderID")):
@@ -202,6 +204,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling()
+
 
 
 
