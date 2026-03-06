@@ -166,8 +166,7 @@ async def handle_query(update, context):
         err_msg = ""
         try:
             # 1. FIX: Server Time Sync to prevent 'invalid signature'
-            time_resp = requests.get("https://clob.polymarket.com/time", timeout=5).json()
-            # The SDK handles the actual sync; fetching it ensures we are not on a stale local session
+            requests.get("https://clob.polymarket.com/time", timeout=5).json()
             
             local_client = init_clob()
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
@@ -202,6 +201,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
