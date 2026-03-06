@@ -12,6 +12,8 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+
+# Polymarket SDK Imports
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
@@ -21,6 +23,7 @@ getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 
+# Constants for Polygon / Polymarket
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
@@ -32,7 +35,7 @@ LOGO = """<pre>
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
-# --- 2. HYDRA ENGINE (FIXED RPC) ---
+# --- 2. HYDRA ENGINE (RPC & WEB3) ---
 def get_hydra_w3():
     endpoints = [
         os.getenv("RPC_URL"), 
@@ -53,7 +56,7 @@ def get_hydra_w3():
 
 w3 = get_hydra_w3()
 if not w3:
-    print("FATAL: RPC Failure. All nodes are unreachable."); import sys; sys.exit(1)
+    print("FATAL: RPC Failure."); import sys; sys.exit(1)
 
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
@@ -83,7 +86,7 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. ARBITRAGE MATH ---
+# --- 4. ARBITRAGE MATH & DATA ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
@@ -127,7 +130,17 @@ async def scour_arbitrage():
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
                         days_left = round((end_dt.timestamp() - now_ts) / (24 * 3600), 1)
-                        ARBI_CACHE.append({"title": f"[{max(0, days_left)}d] " + e.get('title')[:25], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'], "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'], "roi": arb['roi'], "eff": arb['eff'], "ends": end_date_str})
+                        ARBI_CACHE.append({
+                            "title": f"[{max(0, days_left)}d] " + e.get('title')[:25], 
+                            "condition_id": m['conditionId'],
+                            "yes_id": m_data['YES']['id'], 
+                            "no_id": m_data['NO']['id'], 
+                            "p_y": m_data['YES']['price'], 
+                            "p_n": m_data['NO']['price'], 
+                            "roi": arb['roi'], 
+                            "eff": arb['eff'], 
+                            "ends": end_date_str
+                        })
         except: continue
     ARBI_CACHE.sort(key=lambda x: x['eff'])
     return len(ARBI_CACHE) > 0
@@ -150,7 +163,7 @@ async def main_handler(update, context):
         try:
             bal = usdc_e_contract.functions.balanceOf(vault.address).call()
             await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
-        except: await update.message.reply_text("❌ <b>RPC Error fetching balance.</b>")
+        except: await update.message.reply_text("❌ <b>RPC ERROR</b>")
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -178,19 +191,32 @@ async def handle_query(update, context):
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
+        
+        # 404 FIX: We resolve the market via its metadata to ensure CLOB knows it
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # FIXED: Fetch full market object for tick_size validation
+                # Fetch full market object to resolve IDs and tick_size
                 market = clob_client.get_market(t_id)
-                order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY, expiration=0)
+                
+                order_args = OrderArgs(
+                    token_id=str(t_id),
+                    price=0.99, # Marketable price
+                    size=float(amt),
+                    side=BUY,
+                    expiration=0
+                )
+                
+                # Use standard createAndPostOrder if available, or create_order with options
                 created_order = clob_client.create_order(market, order_args, OrderType.FOK)
                 resp = clob_client.post_order(created_order)
+                
                 if not (resp.get("success") or resp.get("orderID")):
                     err_msg = resp.get("errorMsg") or str(resp)
                     break 
             except Exception as e: 
                 err_msg = str(e)
                 break
+        
         status = "✅ <b>ARBITRAGE SECURED</b>" if not err_msg else f"⚠️ <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
@@ -199,8 +225,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot Active (Enhanced RPC mode)...")
+    print("Hydra Bot v230 Active...")
     app.run_polling()
+
 
 
 
