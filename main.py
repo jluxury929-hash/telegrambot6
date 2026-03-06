@@ -144,7 +144,6 @@ async def main_handler(update, context):
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # Re-added $5 calibration
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'FIX APPROVAL' in cmd:
@@ -171,16 +170,13 @@ async def handle_query(update, context):
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
-        
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
-                # FIXED: Removed 'expiration' from constructor to avoid unexpected keyword error
                 order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
                 
-                # FIXED: Manually inject attributes after instantiation
-                expiry = int(time.time() + 120)
+                # FIXED: expiration must be 0 for market/FOK orders to avoid the invalid value error
                 setattr(order_args, 'size', float(amt))
-                setattr(order_args, 'expiration', expiry)
+                setattr(order_args, 'expiration', 0) 
 
                 created_order = clob_client.create_order(order_args)
                 resp = clob_client.post_order(created_order)
