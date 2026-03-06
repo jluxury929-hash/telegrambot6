@@ -91,7 +91,10 @@ async def fetch_full_market(cond_id):
         r = await asyncio.to_thread(requests.get, f"https://clob.polymarket.com/markets/{cond_id}", timeout=5)
         d = r.json()
         if not d or 'tokens' not in d: return None
-        return {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
+        return {
+            "tokens": {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])},
+            "neg_risk": d.get("neg_risk", False)
+        }
     except: return None
 
 async def scour_arbitrage():
@@ -113,13 +116,18 @@ async def scour_arbitrage():
                 if end_dt.timestamp() > limit_ts: continue
                 
                 m_data = await fetch_full_market(m['conditionId'])
-                if m_data and 'YES' in m_data and 'NO' in m_data:
-                    arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
+                if m_data and 'YES' in m_data['tokens'] and 'NO' in m_data['tokens']:
+                    arb = calculate_arbitrage_guaranteed(m_data['tokens']['YES']['price'], m_data['tokens']['NO']['price'], 100.0)
                     if arb:
                         ARBI_CACHE.append({
                             "title": f"[{round((end_dt.timestamp()-time.time())/86400, 1)}d] " + e.get('title')[:25], 
-                            "condition_id": m['conditionId'], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'], 
-                            "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'], "roi": arb['roi'], "eff": arb['eff'], "ends": m['endDate']
+                            "condition_id": m['conditionId'], 
+                            "yes_id": m_data['tokens']['YES']['id'], 
+                            "no_id": m_data['tokens']['NO']['id'], 
+                            "p_y": m_data['tokens']['YES']['price'], 
+                            "p_n": m_data['tokens']['NO']['price'], 
+                            "roi": arb['roi'], "eff": arb['eff'], "ends": m['endDate'],
+                            "neg_risk": m_data['neg_risk']
                         })
         except: continue
     ARBI_CACHE.sort(key=lambda x: x['eff'])
@@ -184,10 +192,12 @@ async def handle_query(update, context):
             
             for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
                 order_args = OrderArgs(token_id=str(t_id), price=0.99, size=float(amt), side=BUY)
-                signed_order = client.create_order(order_args)
+                
+                # Use create_order which handles hashing with the correct neg_risk flag
+                # Note: 'neg_risk' must be passed to create_order for certain markets
+                signed_order = client.create_order(order_args, neg_risk=target['neg_risk'])
                 resp = client.post_order(signed_order, OrderType.FOK)
                 
-                # TYPE GUARD: Checks if response is HTTP Code (int) or Success Data (dict)
                 if isinstance(resp, int):
                     if resp not in [200, 201]:
                         err_msg = f"HTTP Error {resp}: Signature mismatch or lack of funds."
@@ -213,6 +223,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot Active...")
     app.run_polling(drop_pending_updates=True)
+
 
 
 
