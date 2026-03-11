@@ -97,7 +97,7 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. ARBITRAGE MATH ---
+# --- 4. MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
@@ -141,7 +141,14 @@ async def scour_arbitrage():
                     arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
                     if arb:
                         days_left = round((end_dt.timestamp() - now_ts) / (24 * 3600), 1)
-                        ARBI_CACHE.append({"title": f"[{max(0, days_left)}d] " + e.get('title')[:25], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'], "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'], "roi": arb['roi'], "eff": arb['eff'], "ends": end_date_str})
+                        ARBI_CACHE.append({
+                            "title": f"[{max(0, days_left)}d] " + e.get('title')[:25], 
+                            "yes_id": m_data['YES']['id'], 
+                            "no_id": m_data['NO']['id'], 
+                            "p_y": m_data['YES']['price'], 
+                            "p_n": m_data['NO']['price'], 
+                            "roi": arb['roi'], "eff": arb['eff'], "ends": end_date_str
+                        })
         except: continue
     ARBI_CACHE.sort(key=lambda x: x['eff'])
     return len(ARBI_CACHE) > 0
@@ -164,10 +171,11 @@ async def main_handler(update, context):
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6
         aave_data = aave_pool_contract.functions.getUserAccountData(vault.address).call()
-        avail_borrow = aave_data[2] / 1e8  # Aave uses 8 decimals for USD base
+        avail_borrow = aave_data[2] / 1e8  
         hf = aave_data[5] / 1e18
         
         msg = (f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n"
+               f"<b>Address:</b> <code>{vault.address}</code>\n"
                f"<b>Wallet USDC:</b> ${bal:.2f}\n"
                f"<b>Aave Credit:</b> ${avail_borrow:.2f}\n"
                f"<b>Health Factor:</b> {hf:.2f}\n"
@@ -179,13 +187,23 @@ async def main_handler(update, context):
         aave_data = aave_pool_contract.functions.getUserAccountData(vault.address).call()
         total_pwr = bal + (aave_data[2] / 1e8)
         
-        # Dynamic options based on actual liquidity
-        opts = [10, 50, 100, 250, 500, 1000, 2500]
-        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in opts if x <= total_pwr]]
-        if not kb: kb = [[InlineKeyboardButton("$5 (Min)", callback_data="SET_5")]]
+        # Expanded Tiered Options for Flash Loans/Credit
+        opts = [10, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+        valid_opts = [x for x in opts if x <= total_pwr]
         
-        await update.message.reply_text(f"<b>CALIBRATE STRIKE CAPITAL:</b>\n<i>Max Power: ${total_pwr:.2f}</i>", 
-                                        reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        # Organize into rows of 3 for scannability
+        rows = [valid_opts[i:i + 3] for i in range(0, len(valid_opts), 3)]
+        kb = [[InlineKeyboardButton(f"${val}", callback_data=f"SET_{val}") for val in row] for row in rows]
+        
+        if not kb: 
+            kb = [[InlineKeyboardButton("$5 (Min)", callback_data="SET_5")]]
+        
+        await update.message.reply_text(
+            f"<b>CALIBRATE STRIKE CAPITAL</b>\n"
+            f"Select amount to utilize from combined Wallet + Aave Credit.\n"
+            f"<i>Max Available: ${total_pwr:.2f}</i>", 
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML'
+        )
 
     elif 'FIX APPROVAL' in cmd:
         try:
@@ -230,8 +248,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot (Aave Credit-Line) Active...")
+    print("Hydra Bot (Tiered Credit-Line) Active...")
     app.run_polling()
+
 
 
 
