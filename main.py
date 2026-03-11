@@ -24,8 +24,6 @@ ARBI_CACHE = []
 # ADDRESSES
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
-# Aave V3 Data Provider (Polygon)
-AAVE_DATA_PROVIDER = Web3.to_checksum_address("0x69FA688f1Dc4744885373628A3917a0201292B6a")
 
 LOGO = """<pre>
 █████╗ ██████╗ ███████╗██╗   ██╗
@@ -56,12 +54,7 @@ ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
     {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}
 ]
-AAVE_DATA_ABI = [
-    {"inputs": [{"internalType": "address", "name": "asset", "type": "address"}], "name": "getReserveData", "outputs": [{"internalType": "uint256", "name": "unbacked", "type": "uint256"}, {"internalType": "uint256", "name": "accruedToTreasuryScaled", "type": "uint256"}, {"internalType": "uint256", "name": "totalAToken", "type": "uint256"}, {"internalType": "uint256", "name": "totalStableDebt", "type": "uint256"}, {"internalType": "uint256", "name": "totalVariableDebt", "type": "uint256"}, {"internalType": "uint256", "name": "liquidityRate", "type": "uint256"}, {"internalType": "uint256", "name": "variableBorrowRate", "type": "uint256"}, {"internalType": "uint256", "name": "stableBorrowRate", "type": "uint256"}, {"internalType": "uint256", "name": "averageStableBorrowRate", "type": "uint256"}, {"internalType": "uint256", "name": "liquidityIndex", "type": "uint256"}, {"internalType": "uint256", "name": "variableBorrowIndex", "type": "uint256"}, {"internalType": "uint256", "name": "lastUpdateTimestamp", "type": "uint40"}], "stateMutability": "view", "type": "function"}
-]
-
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-aave_data_contract = w3.eth.contract(address=AAVE_DATA_PROVIDER, abi=AAVE_DATA_ABI)
 
 # --- 3. VAULT & CLOB AUTH ---
 def get_vault():
@@ -137,7 +130,7 @@ async def scour_arbitrage():
 # --- 5. BOT HANDLERS ---
 async def start(update, context):
     btns = [[' START ARBI-SCAN', ' CALIBRATE'], [' VAULT', ' FIX APPROVAL']]
-    welcome_text = (f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>\n<i>Filtering for &lt; 3-day settlements.</i>")
+    welcome_text = (f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>\n<i>Filtering for < 3-day settlements.</i>")
     await update.message.reply_text(welcome_text, reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
@@ -145,84 +138,99 @@ async def main_handler(update, context):
     if 'START ARBI-SCAN' in cmd:
         m = await update.message.reply_text(" <b>SCANNING...</b>", parse_mode='HTML')
         if await scour_arbitrage():
-            kb = [[InlineKeyboardButton(f"{a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
+            kb = [[InlineKeyboardButton(f" {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
             await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text(" <b>NO &lt; 3-DAY ARBS DETECTED.</b>")
+        else: await m.edit_text(" <b>NO < 3-DAY ARBS DETECTED.</b>")
+    
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
         await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
+    
     elif 'CALIBRATE' in cmd:
-        bal = usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6
-        flash_status = "ON ⚡" if context.user_data.get('flash_mode') else "OFF"
-        kb = [
-            [InlineKeyboardButton(f"${round(bal*0.1, 2)} (10%)", callback_data=f"SET_{bal*0.1}"),
-             InlineKeyboardButton(f"${round(bal*0.5, 2)} (50%)", callback_data=f"SET_{bal*0.5}")],
-            [InlineKeyboardButton("⚡ CALIBRATE FLASH LOANS (AAVE V3)", callback_data="GET_AAVE_LOAN")],
-            [InlineKeyboardButton(f"⚡ FLASH MODE: {flash_status}", callback_data="TOGGLE_FLASH")]
+        # Get live balance to calculate USD borrow amounts
+        bal_raw = usdc_e_contract.functions.balanceOf(vault.address).call()
+        bal = bal_raw / 1e6
+        
+        # Existing Fixed Capital Row
+        fixed_kb = [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]
+        
+        # New Flash Loan Row: Calculations for 10%, 25%, 50%, 100%
+        # Displays ONLY the dollar amount being borrowed
+        f_10 = round(bal * 0.10, 2)
+        f_25 = round(bal * 0.25, 2)
+        f_50 = round(bal * 0.50, 2)
+        f_100 = round(bal * 1.00, 2)
+        
+        flash_kb = [
+            InlineKeyboardButton(f"Borrow ${f_10}", callback_data=f"SET_{f_10}"),
+            InlineKeyboardButton(f"Borrow ${f_25}", callback_data=f"SET_{f_25}"),
+            InlineKeyboardButton(f"Borrow ${f_50}", callback_data=f"SET_{f_50}"),
+            InlineKeyboardButton(f"Borrow ${f_100}", callback_data=f"SET_{f_100}")
         ]
-        await update.message.reply_text(f"💳 <b>Wallet: ${bal:.2f}</b>\nSelect Capital Strike:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        
+        kb = [
+            fixed_kb, 
+            [InlineKeyboardButton("━━━ FLASH LOAN (USD) ━━━", callback_data="none")], 
+            flash_kb
+        ]
+        
+        await update.message.reply_text(
+            f"<b>CALIBRATE STRIKE CAPITAL</b>\n<i>Balance: ${bal:,.2f}</i>", 
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode='HTML'
+        )
+
     elif 'FIX APPROVAL' in cmd:
         try:
             msg = await update.message.reply_text(" <b>SENDING APPROVAL...</b>", parse_mode='HTML')
-            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137})
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
+                'from': vault.address, 
+                'nonce': w3.eth.get_transaction_count(vault.address), 
+                'gasPrice': int(w3.eth.gas_price * 1.2), 
+                'chainId': 137
+            })
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            w3.eth.send_raw_transaction(getattr(signed, 'raw_transaction', getattr(signed, 'rawTransaction', None)))
+            w3.eth.send_raw_transaction(signed.raw_transaction)
             await msg.edit_text(" <b>USDC APPROVED</b>")
         except Exception as e: await update.message.reply_text(f" <b>FAILED</b>: {e}")
 
 async def handle_query(update, context):
-    q = update.callback_query; await q.answer()
+    q = update.callback_query
+    await q.answer()
+    if q.data == "none": return
+    
+    # Default stake if none set
     stake = float(context.user_data.get('stake', 50))
     
-    if q.data == "TOGGLE_FLASH":
-        context.user_data['flash_mode'] = not context.user_data.get('flash_mode', False)
-        status = "ENABLED ⚡" if context.user_data['flash_mode'] else "DISABLED"
-        await q.edit_message_text(f"⚡ <b>FLASH MODE {status}</b>")
-        
-    elif q.data == "GET_AAVE_LOAN":
-        # Pull actual pool liquidity from Aave
-        res = aave_data_contract.functions.getReserveData(USDC_E).call()
-        available_vault = (res[2] - (res[3] + res[4])) / 1e6
-        
-        # Show actual millions available in the vault
-        kb = [
-            [InlineKeyboardButton(f"Borrow $1,000", callback_data="SET_1000"),
-             InlineKeyboardButton(f"Borrow $10,000", callback_data="SET_10000")],
-            [InlineKeyboardButton(f"Borrow $50,000", callback_data="SET_50000")],
-            [InlineKeyboardButton("⬅️ BACK", callback_data="BACK_TO_MAIN")]
-        ]
-        await q.edit_message_text(
-            f"💰 <b>AAVE V3 POOL LIQUIDITY</b>\n"
-            f"Asset: <code>USDC.e</code>\n"
-            f"Total Loanable: <b>${available_vault:,.2f}</b>\n\n"
-            f"Select Flash Loan Amount:",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML'
-        )
-
-    elif "SET_" in q.data:
-        context.user_data['stake'] = float(q.data.split("_")[1])
-        await q.edit_message_text(f" <b>CAPITAL LOADED: ${round(context.user_data['stake'], 2)}</b>")
-        
+    if "SET_" in q.data:
+        val = float(q.data.split("_")[1])
+        context.user_data['stake'] = val
+        await q.edit_message_text(f" <b>CAPITAL LOADED: ${val:,.2f}</b>")
+    
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         msg = (f"<b>PLAN:</b> {target['title']}\n <b>Ends:</b> {target['ends']}\n\n YES: ${calc['stake_yes']}\n NO: ${calc['stake_no']}\n ROI: {calc['roi']}%")
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(" EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]), parse_mode='HTML')
-        
+    
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
+        
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
                 order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
-                if not hasattr(order_args, 'size'): setattr(order_args, 'size', float(amt))
-                resp = clob_client.post_order(clob_client.create_order(order_args))
+                if not hasattr(order_args, 'size'):
+                    setattr(order_args, 'size', float(amt))
+                created_order = clob_client.create_order(order_args)
+                resp = clob_client.post_order(created_order)
                 if not (resp.get("success") or resp.get("orderID")):
                     err_msg = resp.get("errorMsg") or str(resp)
                     break
             except Exception as e:
-                err_msg = str(e); break
+                err_msg = str(e)
+                break
         
         status = " <b>ARBITRAGE SECURED</b>" if not err_msg else f" <b>EXE ERROR</b>\n<code>{err_msg}</code>"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
@@ -232,8 +240,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot (Aave Flash) Active...")
+    print("Hydra Bot (Flash Loan USD Mode) Active...")
     app.run_polling()
+
 
 
 
