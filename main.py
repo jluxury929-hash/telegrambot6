@@ -21,7 +21,7 @@ getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-AAVE_POOL_ADDR = Web3.to_checksum_address("0x7937d4799803FbF533D7f4E47c2EF2020227E991")
+AAVE_POOL_ADDR = Web3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """<pre>
@@ -30,7 +30,7 @@ LOGO = """<pre>
  ███████║██████╔╝█████╗    ╚███╔╝
  ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
  ██║  ██║██║     ███████╗██╔╝ ██╗
- ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v290-PRECISE</pre>"""
+ ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v315-STABLE</pre>"""
 
 # --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
@@ -83,15 +83,13 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. FORMATTING & MATH ---
+# --- 4. FORMATTING ---
 def format_currency(amount):
-    """Forces 2-decimal display for all currency."""
+    """Ensures $X.XX format."""
     return f"${float(amount):,.2f}"
 
 def abbreviate_amount(amount):
-    """Shorthand for UI buttons while maintaining decimal awareness."""
     amt = float(amount)
-    if amt >= 1000000: return f"${amt/1000000:,.2f}M"
     if amt >= 1000: return f"${amt/1000:,.1f}k"
     return format_currency(amt)
 
@@ -105,127 +103,68 @@ def get_aave_metrics():
         return {"power": float(data[2] / 1e8), "health": float(data[5] / 1e18)}
     except: return {"power": 0.00, "health": 0.00}
 
-def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
-    combined_prob = p_yes + p_no
-    if combined_prob <= 0: return None
-    stake_yes = (p_no / combined_prob) * total_capital
-    stake_no = (p_yes / combined_prob) * total_capital
-    if stake_yes < 1.0 or stake_no < 1.0: return None
-    profit = (stake_yes / p_yes) - total_capital
-    return {"stake_yes": stake_yes, "stake_no": stake_no, "roi": (profit/total_capital)*100, "eff": combined_prob}
-
-# --- 5. MARKET SCANNER ---
-async def fetch_full_market(cond_id):
-    try:
-        url = f"https://clob.polymarket.com/markets/{cond_id}"
-        r = await asyncio.to_thread(requests.get, url, timeout=5)
-        d = r.json()
-        return {t['outcome'].upper(): {"id": t['token_id'], "price": float(t['price'])} for t in d.get('tokens', [])}
-    except: return None
-
-async def scour_arbitrage():
-    global ARBI_CACHE
-    ARBI_CACHE = []
-    cutoff_sec = 3 * 24 * 60 * 60
-    now_ts = time.time()
-    limit_ts = now_ts + cutoff_sec
-    tags = [1, 10, 100, 4, 6, 237]
-    for tag in tags:
-        url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}"
-        try:
-            resp = await asyncio.to_thread(requests.get, url, timeout=5)
-            for e in resp.json():
-                markets = e.get('markets', [])
-                if not markets: continue
-                m = markets[0]
-                end_date_str = m.get('endDate')
-                if not end_date_str: continue
-                end_dt = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
-                if end_dt.timestamp() > limit_ts: continue
-                m_data = await fetch_full_market(m['conditionId'])
-                if m_data and 'YES' in m_data and 'NO' in m_data:
-                    arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
-                    if arb:
-                        days_left = round((end_dt.timestamp() - now_ts) / (24 * 3600), 1)
-                        ARBI_CACHE.append({"title": f"[{max(0, days_left)}d] " + e.get('title')[:25], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'], "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'], "roi": arb['roi'], "eff": arb['eff']})
-        except: continue
-    ARBI_CACHE.sort(key=lambda x: x['eff'])
-    return len(ARBI_CACHE) > 0
-
-# --- 6. HANDLERS ---
+# --- 5. HANDLERS ---
 async def start(update, context):
     btns = [['🚀 START ARBI-SCAN'], ['⚡ FLASH CALIBRATE'], ['⚙️ CALIBRATE'], ['🏦 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA V290 PRECISE READY</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA V315 ONLINE</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
-    if 'START ARBI-SCAN' in cmd:
-        m = await update.message.reply_text("🔍 <b>SCANNING...</b>", parse_mode='HTML')
-        if await scour_arbitrage():
-            kb = [[InlineKeyboardButton(f"📈 {a['title']} ({a['roi']:.1f}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
-            await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text("⚠️ <b>NO < 3-DAY ARBS DETECTED.</b>")
-
-    elif 'FLASH CALIBRATE' in cmd:
+    
+    # 1. FLASH CALIBRATE (Leveaged Strike)
+    if 'FLASH CALIBRATE' in cmd:
         metrics = get_aave_metrics()
-        bal = get_wallet_balance()
-
         if metrics['power'] < 0.10:
-            msg = (f"⚠️ <b>COLLATERAL REQUIRED</b>\n\n"
-                   f"Address: <code>{vault.address}</code>\n"
-                   f"Wallet Bal: {format_currency(bal)}\n\n"
-                   f"1. Send $18.00+ USDC.e to the address above.\n"
-                   f"2. Click '📥 AUTO-DEPOSIT' below.")
+            bal = get_wallet_balance()
+            msg = (f"⚠️ <b>DEPOSIT REQUIRED</b>\n\nWallet: {format_currency(bal)}\n"
+                   f"1. Send funds to <code>{vault.address}</code>\n"
+                   f"2. Click '📥 AUTO-DEPOSIT'")
             kb = [[InlineKeyboardButton("📥 AUTO-DEPOSIT TO AAVE", callback_data="ACT_DEPOSIT")]]
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             return
         
-        kb = [[InlineKeyboardButton(f"⚡ {abbreviate_amount(metrics['power'] * t * 1000)} Strike", callback_data=f"SET_{metrics['power'] * t * 1000}")] for t in [0.10, 0.25, 0.50, 1.00]]
-        await update.message.reply_text(f"⚡ <b>1000x FLASH CONSOLE</b>\nPower: {format_currency(metrics['power'])}\nHealth: {metrics['health']:.2f}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        kb = [[InlineKeyboardButton(f"⚡ {abbreviate_amount(metrics['power']*t*1000)} Strike", callback_data=f"SET_{metrics['power']*t*1000}")] for t in [0.10, 0.50, 1.00]]
+        await update.message.reply_text("⚡ <b>1000x LEVERAGE SCALE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
+    # 2. REGULAR CALIBRATE (Manual Strike) - FIXED CHECK
+    elif 'CALIBRATE' in cmd:
+        amounts = [5.00, 10.00, 50.00, 100.00, 500.00, 1000.00]
+        kb = []
+        for i in range(0, len(amounts), 2):
+            row = [
+                InlineKeyboardButton(format_currency(amounts[i]), callback_data=f"SET_{amounts[i]}"),
+                InlineKeyboardButton(format_currency(amounts[i+1]), callback_data=f"SET_{amounts[i+1]}")
+            ]
+            kb.append(row)
+        await update.message.reply_text("⚙️ <b>MANUAL STRIKE SETUP:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    # 3. VAULT
     elif 'VAULT' in cmd:
         bal = get_wallet_balance()
         metrics = get_aave_metrics()
-        await update.message.reply_text(f"🏦 <b>VAULT:</b> <code>{vault.address}</code>\n<b>Wallet:</b> {format_currency(bal)}\n<b>Aave Credit:</b> {format_currency(metrics['power'])}", parse_mode='HTML')
+        await update.message.reply_text(f"🏦 <b>VAULT:</b>\nWallet: {format_currency(bal)}\nCredit: {format_currency(metrics['power'])}", parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    stake = float(context.user_data.get('stake', 50.00))
-
+    
     if q.data == "ACT_DEPOSIT":
         bal_val = get_wallet_balance()
         bal_raw = int(bal_val * 1e6)
-        if bal_raw <= 0:
-            await q.edit_message_text("❌ <b>EMPTY WALLET.</b> Send funds first.")
-            return
         try:
-            await q.edit_message_text(f"⏳ <b>MOVING {format_currency(bal_val)} TO AAVE...</b>")
+            await q.edit_message_text(f"⏳ <b>PROCESSING {format_currency(bal_val)}...</b>")
+            # --- WEB3 FIX: raw_transaction ---
             tx1 = usdc_e_contract.functions.approve(AAVE_POOL_ADDR, bal_raw).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': w3.eth.gas_price, 'chainId': 137})
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx1, vault.key).rawTransaction)
-            time.sleep(3)
-            tx2 = aave_pool_contract.functions.supply(USDC_E, bal_raw, vault.address, 0).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': w3.eth.gas_price, 'chainId': 137})
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx2, vault.key).rawTransaction)
-            await q.edit_message_text(f"✅ <b>SUCCESS.</b> {format_currency(bal_val)} now active.")
+            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx1, vault.key).raw_transaction)
+            time.sleep(6)
+            tx2 = aave_pool_contract.functions.supply(USDC_E, bal_raw, vault.address, 0).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.1), 'chainId': 137})
+            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx2, vault.key).raw_transaction)
+            await q.edit_message_text(f"✅ <b>COLLATERAL DEPOSITED</b>")
         except Exception as e: await q.edit_message_text(f"❌ <b>ERR:</b> {e}")
 
     elif "SET_" in q.data:
         val = float(q.data.split("_")[1])
         context.user_data['stake'] = val
-        await q.edit_message_text(f"💰 <b>CAPITAL SET: {format_currency(val)}</b>", parse_mode='HTML')
-
-    elif "ARB_" in q.data:
-        target = ARBI_CACHE[int(q.data.split("_")[1])]
-        calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        msg = f"📝 <b>PLAN:</b> {target['title']}\n\n✅ YES: {format_currency(calc['stake_yes'])}\n❌ NO: {format_currency(calc['stake_no'])}\n📊 ROI: {calc['roi']:.2f}%"
-        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]), parse_mode='HTML')
-
-    elif "EXE_" in q.data:
-        # Final order execution using clob_client
-        target = ARBI_CACHE[int(q.data.split("_")[1])]
-        calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        await q.edit_message_text(f"🚀 <b>EXECUTING {format_currency(stake)} STRIKE...</b>")
-        # (Order posting logic same as v280)
-        await context.bot.send_message(q.message.chat_id, "✅ <b>POSITION SECURED</b>", parse_mode='HTML')
+        await q.edit_message_text(f"💰 <b>CAPITAL LOCKED: {format_currency(val)}</b>", parse_mode='HTML')
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
@@ -233,7 +172,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
-
 
 
 
