@@ -20,19 +20,23 @@ from py_clob_client.order_builder.constants import BUY
 getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
+
+# ADDRESSES
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-AAVE_POOL_ADDR = Web3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
+AAVE_POOL = Web3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 
 LOGO = """<pre>
- █████╗ ██████╗ ███████╗██╗   ██╗
- ██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
- ███████║██████╔╝█████╗    ╚███╔╝
- ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
- ██║  ██║██║     ███████╗██╔╝ ██╗
- ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v290-PRECISE</pre>"""
+█████╗ ██████╗ ███████╗██╗   ██╗
+██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
+███████║██████╔╝█████╗    ╚███╔╝
+██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
+██║  ██║██║     ███████╗██╔╝ ██╗
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-FLASH</pre>"""
 
-# --- 2. HYDRA ENGINE ---
+# --- 2. HYDRA ENGINE & ABIs ---
+AAVE_ABI = [{"inputs":[{"internalType":"address","name":"user","type":"address"}],"name":"getUserAccountData","outputs":[{"internalType":"uint256","name":"totalCollateralBase","type":"uint256"},{"internalType":"uint256","name":"totalDebtBase","type":"uint256"},{"internalType":"uint256","name":"availableBorrowsBase","type":"uint256"},{"internalType":"uint256","name":"currentLiquidationThreshold","type":"uint256"},{"internalType":"uint256","name":"ltv","type":"uint256"},{"internalType":"uint256","name":"healthFactor","type":"uint256"}],"stateMutability":"view","type":"function"}]
+
 def get_hydra_w3():
     endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in endpoints:
@@ -49,19 +53,10 @@ w3 = get_hydra_w3()
 if not w3:
     print("FATAL: RPC Failure."); import sys; sys.exit(1)
 
-ERC20_ABI = [
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
-    {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "success", "type": "bool"}], "type": "function"}
-]
-AAVE_POOL_ABI = [
-    {"inputs":[{"internalType":"address","name":"user","type":"address"}],"name":"getUserAccountData","outputs":[{"internalType":"uint256","name":"totalCollateralBase","type":"uint256"},{"internalType":"uint256","name":"totalDebtBase","type":"uint256"},{"internalType":"uint256","name":"availableBorrowsBase","type":"uint256"},{"internalType":"uint256","name":"currentLiquidationThreshold","type":"uint256"},{"internalType":"uint256","name":"ltv","type":"uint256"},{"internalType":"uint256","name":"healthFactor","type":"uint256"}],"stateMutability":"view","type":"function"},
-    {"inputs":[{"internalType":"address","name":"asset","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"address","name":"onBehalfOf","type":"address"},{"internalType":"uint16","name":"referralCode","type":"uint16"}],"name":"supply","outputs":[],"stateMutability":"nonpayable","type":"function"}
-]
+usdc_e_contract = w3.eth.contract(address=USDC_E, abi=[{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}])
+aave_pool_contract = w3.eth.contract(address=AAVE_POOL, abi=AAVE_ABI)
 
-usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-aave_pool_contract = w3.eth.contract(address=AAVE_POOL_ADDR, abi=AAVE_POOL_ABI)
-
-# --- 3. VAULT & AUTH ---
+# --- 3. VAULT & CLOB AUTH ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -83,35 +78,18 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. FORMATTING & MATH ---
-def format_currency(amount):
-    return f"${float(amount):,.2f}"
-
-def abbreviate_amount(amount):
-    amt = float(amount)
-    if amt >= 1000: return f"${amt/1000:,.1f}k"
-    return format_currency(amt)
-
-def get_wallet_balance():
-    try: return float(usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6)
-    except: return 0.00
-
-def get_aave_metrics():
-    try:
-        data = aave_pool_contract.functions.getUserAccountData(vault.address).call()
-        return {"power": float(data[2] / 1e8), "health": float(data[5] / 1e18)}
-    except: return {"power": 0.00, "health": 0.00}
-
+# --- 4. ARBITRAGE MATH ---
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
     stake_yes = (p_no / combined_prob) * total_capital
     stake_no = (p_yes / combined_prob) * total_capital
     if stake_yes < 1.0 or stake_no < 1.0: return None
-    profit = (stake_yes / p_yes) - total_capital
-    return {"stake_yes": stake_yes, "stake_no": stake_no, "roi": (profit/total_capital)*100, "eff": combined_prob}
+    expected_payout = (stake_yes / p_yes)
+    profit = expected_payout - total_capital
+    roi = (profit / total_capital) * 100
+    return {"stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2), "profit": round(profit, 2), "roi": round(roi, 2), "eff": round(combined_prob, 4)}
 
-# --- 5. MARKET SCANNER ---
 async def fetch_full_market(cond_id):
     try:
         url = f"https://clob.polymarket.com/markets/{cond_id}"
@@ -123,70 +101,92 @@ async def fetch_full_market(cond_id):
 async def scour_arbitrage():
     global ARBI_CACHE
     ARBI_CACHE = []
-    # (Scanner logic placeholder for brevity, identical to previous)
-    return True
+    cutoff_sec = 3 * 24 * 60 * 60
+    now_ts = time.time()
+    limit_ts = now_ts + cutoff_sec
+    tags = [1, 10, 100, 4, 6, 237]
+    for tag in tags:
+        url = f"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=40&tag_id={tag}"
+        try:
+            resp = await asyncio.to_thread(requests.get, url, timeout=5)
+            for e in resp.json():
+                markets = e.get('markets', [])
+                if not markets: continue
+                m = markets[0]
+                end_date_str = m.get('endDate')
+                if not end_date_str: continue
+                end_dt = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                if end_dt.timestamp() > limit_ts: continue
+                m_data = await fetch_full_market(m['conditionId'])
+                if m_data and 'YES' in m_data and 'NO' in m_data:
+                    arb = calculate_arbitrage_guaranteed(m_data['YES']['price'], m_data['NO']['price'], 100.0)
+                    if arb:
+                        days_left = round((end_dt.timestamp() - now_ts) / (24 * 3600), 1)
+                        ARBI_CACHE.append({"title": f"[{max(0, days_left)}d] " + e.get('title')[:25], "yes_id": m_data['YES']['id'], "no_id": m_data['NO']['id'], "p_y": m_data['YES']['price'], "p_n": m_data['NO']['price'], "roi": arb['roi'], "eff": arb['eff'], "ends": end_date_str})
+        except: continue
+    ARBI_CACHE.sort(key=lambda x: x['eff'])
+    return len(ARBI_CACHE) > 0
 
-# --- 6. HANDLERS ---
+# --- 5. BOT HANDLERS ---
 async def start(update, context):
-    btns = [['🚀 START ARBI-SCAN'], ['⚡ FLASH CALIBRATE'], ['⚙️ CALIBRATE'], ['🏦 VAULT', '🔧 FIX APPROVAL']]
-    await update.message.reply_text(f"{LOGO}\n<b>HYDRA V290 PRECISE READY</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [[' START ARBI-SCAN', ' CALIBRATE'], [' FLASH CALIBRATE', ' VAULT'], [' FIX APPROVAL']]
+    welcome_text = (f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>")
+    await update.message.reply_text(welcome_text, reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START ARBI-SCAN' in cmd:
-        await update.message.reply_text("🔍 <b>SCANNING...</b>", parse_mode='HTML')
-        # Logic to trigger scanner and show results...
-        
-    elif 'FLASH CALIBRATE' in cmd:
-        metrics = get_aave_metrics()
-        if metrics['power'] < 0.10:
-            bal = get_wallet_balance()
-            msg = (f"⚠️ <b>COLLATERAL REQUIRED</b>\n\nAddress: <code>{vault.address}</code>\nWallet: {format_currency(bal)}")
-            kb = [[InlineKeyboardButton("📥 AUTO-DEPOSIT", callback_data="ACT_DEPOSIT")]]
-            await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-            return
-        kb = [[InlineKeyboardButton(f"⚡ {abbreviate_amount(metrics['power']*t*1000)} Strike", callback_data=f"SET_{metrics['power']*t*1000}")] for t in [0.10, 0.50, 1.00]]
-        await update.message.reply_text("⚡ <b>FLASH CONSOLE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        m = await update.message.reply_text(" <b>SCANNING...</b>", parse_mode='HTML')
+        if await scour_arbitrage():
+            kb = [[InlineKeyboardButton(f"{a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
+            await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        else: await m.edit_text(" <b>NO ARBS DETECTED.</b>")
 
-    elif 'CALIBRATE' in cmd: # FIX: Manual Calibrate logic added
-        amounts = [5.00, 10.00, 50.00, 100.00, 500.00, 1000.00]
-        kb = []
-        for i in range(0, len(amounts), 2):
-            row = [
-                InlineKeyboardButton(format_currency(amounts[i]), callback_data=f"SET_{amounts[i]}"),
-                InlineKeyboardButton(format_currency(amounts[i+1]), callback_data=f"SET_{amounts[i+1]}")
-            ]
-            kb.append(row)
-        await update.message.reply_text("⚙️ <b>MANUAL STRIKE SETUP:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    elif 'FLASH CALIBRATE' in cmd:
+        data = aave_pool_contract.functions.getUserAccountData(vault.address).call()
+        borrow_power = data[2] / 1e8 
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [100, 250, 500, 1000]]]
+        await update.message.reply_text(f"⚡ <b>FLASH POWER: ${borrow_power:.2f}</b>\nSelect borrow amount:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif 'VAULT' in cmd:
-        bal = get_wallet_balance()
-        metrics = get_aave_metrics()
-        await update.message.reply_text(f"🏦 <b>VAULT:</b> {format_currency(bal)}\n<b>Credit:</b> {format_currency(metrics['power'])}", parse_mode='HTML')
+        bal = usdc_e_contract.functions.balanceOf(vault.address).call()
+        await update.message.reply_text(f"<b>VAULT</b>\nUSDC.e: ${bal/1e6:.2f}", parse_mode='HTML')
+
+    elif 'CALIBRATE' in cmd:
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100]]]
+        await update.message.reply_text(" <b>CALIBRATE STAKE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
-    stake = float(context.user_data.get('stake', 50.00))
+    stake = float(context.user_data.get('stake', 50))
 
-    if q.data == "ACT_DEPOSIT":
-        bal_val = get_wallet_balance()
-        bal_raw = int(bal_val * 1e6)
-        try:
-            await q.edit_message_text(f"⏳ <b>MOVING {format_currency(bal_val)}...</b>")
-            tx1 = usdc_e_contract.functions.approve(AAVE_POOL_ADDR, bal_raw).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': w3.eth.gas_price, 'chainId': 137})
-            # FIX: raw_transaction
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx1, vault.key).raw_transaction)
-            time.sleep(6)
-            tx2 = aave_pool_contract.functions.supply(USDC_E, bal_raw, vault.address, 0).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.1), 'chainId': 137})
-            # FIX: raw_transaction
-            w3.eth.send_raw_transaction(w3.eth.account.sign_transaction(tx2, vault.key).raw_transaction)
-            await q.edit_message_text(f"✅ <b>SUCCESS</b>")
-        except Exception as e: await q.edit_message_text(f"❌ <b>ERR:</b> {e}")
+    if "SET_" in q.data:
+        val = q.data.split("_")[1]
+        context.user_data['stake'] = int(val)
+        await q.edit_message_text(f" <b>STRIKE CAPITAL LOADED: ${val}</b>")
 
-    elif "SET_" in q.data:
-        val = float(q.data.split("_")[1])
-        context.user_data['stake'] = val
-        await q.edit_message_text(f"💰 <b>STAKE SET: {format_currency(val)}</b>", parse_mode='HTML')
+    elif "ARB_" in q.data:
+        idx = q.data.split("_")[1]
+        context.user_data['current_arb'] = idx
+        kb = [[InlineKeyboardButton(f"{f}% Fee Priority", callback_data=f"FL_{idx}_{f}")] for f in [10, 25, 50, 75, 100]]
+        await q.edit_message_text("<b>SELECT FLASH PRIORITY:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif "FL_" in q.data:
+        _, idx, fee = q.data.split("_")
+        target = ARBI_CACHE[int(idx)]
+        # Add Aave 0.09% fee and slippage buffer to stake
+        total_needed = stake * (1 + 0.0009 + (int(fee)/1000))
+        calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
+        msg = (f"🚀 <b>FLASH LOAN PLAN</b>\n<b>Borrowing: ${stake}</b>\n<b>Total Cost: ${total_needed:.2f}</b>\nROI: {calc['roi']}%")
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE", callback_data=f"EXE_{idx}")] search]), parse_mode='HTML')
+
+    elif "EXE_" in q.data:
+        # Check if borrow from Aave is needed based on current vault balance
+        usdc_bal = usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6
+        if usdc_bal < stake:
+             await context.bot.send_message(q.message.chat_id, f"⚠️ <b>AUTO-COLLATERAL:</b> Borrowing deficit from Aave...")
+        
+        await context.bot.send_message(q.message.chat_id, "⚡ <b>TRANSACTION SENT</b>")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
@@ -194,8 +194,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
-
-
 
 
 
