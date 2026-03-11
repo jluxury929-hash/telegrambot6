@@ -85,10 +85,11 @@ def get_wallet_balance():
     except: return 0.0
 
 def abbreviate_amount(amount):
-    """Updated to include the requested dollar sign."""
-    if amount >= 1000000: return f"${amount/1000000:.1f}M"
-    if amount >= 1000: return f"${amount/1000:.1f}k"
-    return f"${amount:,.2f}"
+    """Returns flat, integer-based balances with dollar signs."""
+    amt = int(amount)
+    if amt >= 1000000: return f"${amt//1000000}M"
+    if amt >= 1000: return f"${amt//1000}k"
+    return f"${amt}"
 
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
@@ -99,6 +100,7 @@ def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     expected_payout = (stake_yes / p_yes)
     profit = expected_payout - total_capital
     roi = (profit / total_capital) * 100
+    # Calculations keep precision, but UI will flatten them
     return {"stake_yes": round(stake_yes, 2), "stake_no": round(stake_no, 2), "profit": round(profit, 2), "roi": round(roi, 2), "eff": round(combined_prob, 4)}
 
 async def fetch_full_market(cond_id):
@@ -140,6 +142,7 @@ async def scour_arbitrage():
 
 # --- 5. HANDLERS ---
 async def start(update, context):
+    # Full-width hierarchy as requested
     btns = [
         ['🚀 START ARBI-SCAN'],
         ['⚡ FLASH CALIBRATE'],
@@ -153,7 +156,7 @@ async def main_handler(update, context):
     if 'START ARBI-SCAN' in cmd:
         m = await update.message.reply_text("🔍 <b>SCANNING...</b>", parse_mode='HTML')
         if await scour_arbitrage():
-            kb = [[InlineKeyboardButton(f"📈 {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
+            kb = [[InlineKeyboardButton(f"📈 {a['title']} ({int(a['roi'])}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
             await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text("⚠️ <b>NO < 3-DAY ARBS DETECTED.</b>")
     
@@ -162,13 +165,14 @@ async def main_handler(update, context):
         if bal < 1.0:
             await update.message.reply_text("❌ <b>LOW BALANCE</b>")
             return
+        # Max cap is balance * 100 (leverage simulation)
         max_cap = bal * 100
         tiers = [0.10, 0.25, 0.50, 1.00]
         kb = []
         for t in tiers:
-            amt = max_cap * t
+            amt = int(max_cap * t)
             label = abbreviate_amount(amt)
-            kb.append([InlineKeyboardButton(f"⚡ {label}", callback_data=f"SET_{int(amt)}")])
+            kb.append([InlineKeyboardButton(f"⚡ {label}", callback_data=f"SET_{amt}")])
         await update.message.reply_text("⚡ <b>SELECT FLASH LOAN VALUE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif 'CALIBRATE' in cmd:
@@ -177,7 +181,7 @@ async def main_handler(update, context):
 
     elif 'VAULT' in cmd:
         bal = get_wallet_balance()
-        await update.message.reply_text(f"🏦 <b>VAULT AUDIT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"🏦 <b>VAULT AUDIT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${int(bal)}", parse_mode='HTML')
 
     elif 'FIX APPROVAL' in cmd:
         try:
@@ -199,7 +203,8 @@ async def handle_query(update, context):
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        msg = f"📝 <b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n📊 ROI: {calc['roi']}%"
+        # Flattened displays for the execution plan
+        msg = f"📝 <b>PLAN:</b> {target['title']}\n\n✅ YES: ${int(calc['stake_yes'])}\n❌ NO: ${int(calc['stake_no'])}\n📊 ROI: {int(calc['roi'])}%"
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]), parse_mode='HTML')
     
     elif "EXE_" in q.data:
@@ -223,6 +228,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
+
 
 
 
