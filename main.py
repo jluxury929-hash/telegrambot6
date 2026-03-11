@@ -171,9 +171,8 @@ async def main_handler(update, context):
     elif 'VAULT' in cmd:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6
         aave_data = aave_pool_contract.functions.getUserAccountData(vault.address).call()
-        avail_borrow = aave_data[2] / 1e8  
+        avail_borrow = aave_data[2] / 1e8 # Aave uses 8 decimals for USD base
         hf = aave_data[5] / 1e18
-        
         msg = (f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n"
                f"<b>Address:</b> <code>{vault.address}</code>\n"
                f"<b>Wallet USDC:</b> ${bal:.2f}\n"
@@ -186,18 +185,11 @@ async def main_handler(update, context):
         bal = usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6
         aave_data = aave_pool_contract.functions.getUserAccountData(vault.address).call()
         total_pwr = bal + (aave_data[2] / 1e8)
-        
-        # Expanded Tiered Options for Flash Loans/Credit
         opts = [10, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
         valid_opts = [x for x in opts if x <= total_pwr]
-        
-        # Organize into rows of 3 for scannability
         rows = [valid_opts[i:i + 3] for i in range(0, len(valid_opts), 3)]
         kb = [[InlineKeyboardButton(f"${val}", callback_data=f"SET_{val}") for val in row] for row in rows]
-        
-        if not kb: 
-            kb = [[InlineKeyboardButton("$5 (Min)", callback_data="SET_5")]]
-        
+        if not kb: kb = [[InlineKeyboardButton("$5 (Min)", callback_data="SET_5")]]
         await update.message.reply_text(
             f"<b>CALIBRATE STRIKE CAPITAL</b>\n"
             f"Select amount to utilize from combined Wallet + Aave Credit.\n"
@@ -220,8 +212,16 @@ async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 50))
     if "SET_" in q.data:
-        context.user_data['stake'] = int(q.data.split("_")[1])
-        await q.edit_message_text(f"🎯 <b>CAPITAL LOADED: ${context.user_data['stake']}</b>")
+        val = int(q.data.split("_")[1])
+        context.user_data['stake'] = val
+        bal = usdc_e_contract.functions.balanceOf(vault.address).call() / 1e6
+        borrowed = max(0, val - bal)
+        wallet_used = val - borrowed
+        await q.edit_message_text(
+            f"🎯 <b>CAPITAL LOADED: ${val}</b>\n"
+            f"💰 Wallet: ${wallet_used:.2f}\n"
+            f"⚡ Borrowing: ${borrowed:.2f}"
+        )
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
@@ -234,8 +234,11 @@ async def handle_query(update, context):
         err_msg = ""
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
+                # FIX: Injected expiration and size to satisfy the SDK validation
                 order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
                 if not hasattr(order_args, 'size'): setattr(order_args, 'size', float(amt))
+                if not hasattr(order_args, 'expiration'): setattr(order_args, 'expiration', 0)
+                
                 resp = clob_client.post_order(clob_client.create_order(order_args))
                 if not (resp.get("success") or resp.get("orderID")):
                     err_msg = resp.get("errorMsg") or str(resp); break
@@ -250,6 +253,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     print("Hydra Bot (Tiered Credit-Line) Active...")
     app.run_polling()
+
 
 
 
