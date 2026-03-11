@@ -85,9 +85,10 @@ def get_wallet_balance():
     except: return 0.0
 
 def abbreviate_amount(amount):
-    if amount >= 1000000: return f"{amount/1000000:.1f}M"
-    if amount >= 1000: return f"{int(amount/1000)}k"
-    return str(int(amount))
+    """Updated to include the requested dollar sign."""
+    if amount >= 1000000: return f"${amount/1000000:.1f}M"
+    if amount >= 1000: return f"${amount/1000:.1f}k"
+    return f"${amount:,.2f}"
 
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
@@ -139,11 +140,11 @@ async def scour_arbitrage():
 
 # --- 5. HANDLERS ---
 async def start(update, context):
-    # Layout adjustment: Scan (Full Width) | Flash (Full Width) | Cal/Vault/Fix
     btns = [
         ['🚀 START ARBI-SCAN'],
-        ['⚡ FLASH CALIBRATE'], [ '⚙️ CALIBRATE'],
-        [ '🏦 VAULT', '🔧 FIX APPROVAL']
+        ['⚡ FLASH CALIBRATE'],
+        ['⚙️ CALIBRATE'],
+        ['🏦 VAULT', '🔧 FIX APPROVAL']
     ]
     await update.message.reply_text(f"{LOGO}\n<b>HYDRA V230 READY</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
@@ -193,7 +194,7 @@ async def handle_query(update, context):
     if "SET_" in q.data:
         val = int(q.data.split("_")[1])
         context.user_data['stake'] = val
-        await q.edit_message_text(f"💰 <b>CAPITAL: ${abbreviate_amount(val)}</b>", parse_mode='HTML')
+        await q.edit_message_text(f"💰 <b>CAPITAL: {abbreviate_amount(val)}</b>", parse_mode='HTML')
     
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
@@ -222,6 +223,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
+
 
 
 
