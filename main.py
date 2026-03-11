@@ -81,14 +81,12 @@ clob_client = init_clob()
 def get_wallet_balance():
     try:
         bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        return bal / 1e6 
+        return bal / 1e6
     except: return 0.0
 
 def abbreviate_amount(amount):
-    if amount >= 1000000:
-        return f"{amount/1000000:.1f}M"
-    if amount >= 1000:
-        return f"{int(amount/1000)}k"
+    if amount >= 1000000: return f"{amount/1000000:.1f}M"
+    if amount >= 1000: return f"{int(amount/1000)}k"
     return str(int(amount))
 
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
@@ -141,50 +139,52 @@ async def scour_arbitrage():
 
 # --- 5. HANDLERS ---
 async def start(update, context):
-    btns = [[' START ARBI-SCAN', ' CALIBRATE'], ['⚡ FLASH CALIBRATE'], [' VAULT', ' FIX APPROVAL']]
+    # Layout adjustment: Scan (Full Width) | Flash (Full Width) | Cal/Vault/Fix
+    btns = [
+        ['🚀 START ARBI-SCAN'],
+        ['⚡ FLASH CALIBRATE'], [ '⚙️ CALIBRATE'],
+        [ '🏦 VAULT', '🔧 FIX APPROVAL']
+    ]
     await update.message.reply_text(f"{LOGO}\n<b>HYDRA V230 READY</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START ARBI-SCAN' in cmd:
-        m = await update.message.reply_text(" <b>SCANNING...</b>", parse_mode='HTML')
+        m = await update.message.reply_text("🔍 <b>SCANNING...</b>", parse_mode='HTML')
         if await scour_arbitrage():
-            kb = [[InlineKeyboardButton(f"{a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
+            kb = [[InlineKeyboardButton(f"📈 {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
             await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        else: await m.edit_text(" <b>NO < 3-DAY ARBS DETECTED.</b>")
-
+        else: await m.edit_text("⚠️ <b>NO < 3-DAY ARBS DETECTED.</b>")
+    
     elif 'FLASH CALIBRATE' in cmd:
         bal = get_wallet_balance()
         if bal < 1.0:
             await update.message.reply_text("❌ <b>LOW BALANCE</b>")
             return
-        
-        # Calculate 10%, 25%, 50%, 100% of 100x Wallet Balance
         max_cap = bal * 100
         tiers = [0.10, 0.25, 0.50, 1.00]
         kb = []
         for t in tiers:
             amt = max_cap * t
             label = abbreviate_amount(amt)
-            kb.append([InlineKeyboardButton(f"{label}", callback_data=f"SET_{int(amt)}")])
-        
+            kb.append([InlineKeyboardButton(f"⚡ {label}", callback_data=f"SET_{int(amt)}")])
         await update.message.reply_text("⚡ <b>SELECT FLASH LOAN VALUE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-    elif 'CALIBRATE' == cmd.strip():
+    elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
-        await update.message.reply_text(" <b>SET STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await update.message.reply_text("⚙️ <b>SET STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
     elif 'VAULT' in cmd:
         bal = get_wallet_balance()
-        await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal:.2f}", parse_mode='HTML')
+        await update.message.reply_text(f"🏦 <b>VAULT AUDIT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal:.2f}", parse_mode='HTML')
 
     elif 'FIX APPROVAL' in cmd:
         try:
             tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137})
             signed = w3.eth.account.sign_transaction(tx, vault.key)
             w3.eth.send_raw_transaction(signed.rawTransaction)
-            await update.message.reply_text(" ✅ <b>APPROVED</b>", parse_mode='HTML')
-        except Exception as e: await update.message.reply_text(f" <b>ERR:</b> {e}")
+            await update.message.reply_text("✅ <b>USDC APPROVED</b>", parse_mode='HTML')
+        except Exception as e: await update.message.reply_text(f"❌ <b>ERR:</b> {e}")
 
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
@@ -193,13 +193,13 @@ async def handle_query(update, context):
     if "SET_" in q.data:
         val = int(q.data.split("_")[1])
         context.user_data['stake'] = val
-        await q.edit_message_text(f"🚀 <b>CAPITAL: ${abbreviate_amount(val)}</b>", parse_mode='HTML')
+        await q.edit_message_text(f"💰 <b>CAPITAL: ${abbreviate_amount(val)}</b>", parse_mode='HTML')
     
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        msg = f"<b>PLAN:</b> {target['title']}\n YES: ${calc['stake_yes']}\n NO: ${calc['stake_no']}\n ROI: {calc['roi']}%"
-        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(" EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]), parse_mode='HTML')
+        msg = f"📝 <b>PLAN:</b> {target['title']}\n\n✅ YES: ${calc['stake_yes']}\n❌ NO: ${calc['stake_no']}\n📊 ROI: {calc['roi']}%"
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]), parse_mode='HTML')
     
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
@@ -213,8 +213,7 @@ async def handle_query(update, context):
                 if not (resp.get("success") or resp.get("orderID")):
                     err_msg = resp.get("errorMsg") or str(resp); break
             except Exception as e: err_msg = str(e); break
-        
-        status = " ✅ <b>SECURED</b>" if not err_msg else f" ❌ <b>ERR</b>: {err_msg}"
+        status = "✅ <b>SECURED</b>" if not err_msg else f"❌ <b>ERR</b>: {err_msg}"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
@@ -223,6 +222,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
     app.run_polling()
+
 
 
 
