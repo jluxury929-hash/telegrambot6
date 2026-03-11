@@ -21,19 +21,18 @@ getcontext().prec = 28
 load_dotenv()
 ARBI_CACHE = []
 
-# ADDRESSES
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFbE613d03C895dB366BC36B3D966A488007284")
 
 LOGO = """<pre>
 █████╗ ██████╗ ███████╗██╗   ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
-███████║██████╔╝█████╗     ╚███╔╝
+███████║██████╔╝█████╗    ╚███╔╝
 ██╔══██║██╔═══╝ ██╔══╝     ██╔██╗
 ██║  ██║██║     ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ v230-STABLE</pre>"""
 
-# --- 2. HYDRA ENGINE & ABIs ---
+# --- 2. HYDRA ENGINE ---
 def get_hydra_w3():
     endpoints = [os.getenv("RPC_URL"), "https://polygon-rpc.com", "https://1rpc.io/matic"]
     for url in endpoints:
@@ -56,7 +55,7 @@ ERC20_ABI = [
 ]
 usdc_e_contract = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
 
-# --- 3. VAULT & CLOB AUTH ---
+# --- 3. VAULT & AUTH ---
 def get_vault():
     seed = os.getenv("WALLET_SEED", "").strip()
     Account.enable_unaudited_hdwallet_features()
@@ -78,7 +77,20 @@ def init_clob():
 
 clob_client = init_clob()
 
-# --- 4. ARBITRAGE MATH ---
+# --- 4. UTILITIES ---
+def get_wallet_balance():
+    try:
+        bal = usdc_e_contract.functions.balanceOf(vault.address).call()
+        return bal / 1e6 
+    except: return 0.0
+
+def abbreviate_amount(amount):
+    if amount >= 1000000:
+        return f"{amount/1000000:.1f}M"
+    if amount >= 1000:
+        return f"{int(amount/1000)}k"
+    return str(int(amount))
+
 def calculate_arbitrage_guaranteed(p_yes, p_no, total_capital):
     combined_prob = p_yes + p_no
     if combined_prob <= 0: return None
@@ -127,112 +139,82 @@ async def scour_arbitrage():
     ARBI_CACHE.sort(key=lambda x: x['eff'])
     return len(ARBI_CACHE) > 0
 
-# --- 5. BOT HANDLERS ---
+# --- 5. HANDLERS ---
 async def start(update, context):
-    btns = [[' START ARBI-SCAN', ' CALIBRATE'], [' VAULT', ' FIX APPROVAL']]
-    welcome_text = (f"{LOGO}\n<b>HYDRA ARBITRAGE SYSTEM ONLINE</b>\n<i>Filtering for < 3-day settlements.</i>")
-    await update.message.reply_text(welcome_text, reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
+    btns = [[' START ARBI-SCAN', ' CALIBRATE'], ['⚡ FLASH CALIBRATE'], [' VAULT', ' FIX APPROVAL']]
+    await update.message.reply_text(f"{LOGO}\n<b>HYDRA V230 READY</b>", reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True), parse_mode='HTML')
 
 async def main_handler(update, context):
     cmd = update.message.text
     if 'START ARBI-SCAN' in cmd:
         m = await update.message.reply_text(" <b>SCANNING...</b>", parse_mode='HTML')
         if await scour_arbitrage():
-            kb = [[InlineKeyboardButton(f" {a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
+            kb = [[InlineKeyboardButton(f"{a['title']} ({a['roi']}%)", callback_data=f"ARB_{i}")] for i, a in enumerate(ARBI_CACHE[:10])]
             await m.edit_text("<b>SHORT-TERM OPPORTUNITIES:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         else: await m.edit_text(" <b>NO < 3-DAY ARBS DETECTED.</b>")
-    
+
+    elif 'FLASH CALIBRATE' in cmd:
+        bal = get_wallet_balance()
+        if bal < 1.0:
+            await update.message.reply_text("❌ <b>LOW BALANCE</b>")
+            return
+        
+        # Calculate 10%, 25%, 50%, 100% of 100x Wallet Balance
+        max_cap = bal * 100
+        tiers = [0.10, 0.25, 0.50, 1.00]
+        kb = []
+        for t in tiers:
+            amt = max_cap * t
+            label = abbreviate_amount(amt)
+            kb.append([InlineKeyboardButton(f"{label}", callback_data=f"SET_{int(amt)}")])
+        
+        await update.message.reply_text("⚡ <b>SELECT FLASH LOAN VALUE:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+    elif 'CALIBRATE' == cmd.strip():
+        kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]]
+        await update.message.reply_text(" <b>SET STRIKE CAPITAL:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
     elif 'VAULT' in cmd:
-        bal = usdc_e_contract.functions.balanceOf(vault.address).call()
-        await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>Signer:</b> <code>{vault.address}</code>\n<b>USDC.e:</b> ${bal/1e6:.2f}", parse_mode='HTML')
-    
-    elif 'CALIBRATE' in cmd:
-        # Get live balance to calculate USD borrow amounts
-        bal_raw = usdc_e_contract.functions.balanceOf(vault.address).call()
-        bal = bal_raw / 1e6
-        
-        # Existing Fixed Capital Row
-        fixed_kb = [InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 10, 50, 100, 250, 500]]
-        
-        # New Flash Loan Row: Calculations for 10%, 25%, 50%, 100%
-        # Displays ONLY the dollar amount being borrowed
-        f_10 = round(bal * 0.10, 2)
-        f_25 = round(bal * 0.25, 2)
-        f_50 = round(bal * 0.50, 2)
-        f_100 = round(bal * 1.00, 2)
-        
-        flash_kb = [
-            InlineKeyboardButton(f"Borrow ${f_10}", callback_data=f"SET_{f_10}"),
-            InlineKeyboardButton(f"Borrow ${f_25}", callback_data=f"SET_{f_25}"),
-            InlineKeyboardButton(f"Borrow ${f_50}", callback_data=f"SET_{f_50}"),
-            InlineKeyboardButton(f"Borrow ${f_100}", callback_data=f"SET_{f_100}")
-        ]
-        
-        kb = [
-            fixed_kb, 
-            [InlineKeyboardButton("━━━ FLASH LOAN (USD) ━━━", callback_data="none")], 
-            flash_kb
-        ]
-        
-        await update.message.reply_text(
-            f"<b>CALIBRATE STRIKE CAPITAL</b>\n<i>Balance: ${bal:,.2f}</i>", 
-            reply_markup=InlineKeyboardMarkup(kb), 
-            parse_mode='HTML'
-        )
+        bal = get_wallet_balance()
+        await update.message.reply_text(f"<b>VAULT</b>\n<code>{vault.address}</code>\n<b>USDC.e:</b> ${bal:.2f}", parse_mode='HTML')
 
     elif 'FIX APPROVAL' in cmd:
         try:
-            msg = await update.message.reply_text(" <b>SENDING APPROVAL...</b>", parse_mode='HTML')
-            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
-                'from': vault.address, 
-                'nonce': w3.eth.get_transaction_count(vault.address), 
-                'gasPrice': int(w3.eth.gas_price * 1.2), 
-                'chainId': 137
-            })
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({'from': vault.address, 'nonce': w3.eth.get_transaction_count(vault.address), 'gasPrice': int(w3.eth.gas_price * 1.2), 'chainId': 137})
             signed = w3.eth.account.sign_transaction(tx, vault.key)
-            w3.eth.send_raw_transaction(signed.raw_transaction)
-            await msg.edit_text(" <b>USDC APPROVED</b>")
-        except Exception as e: await update.message.reply_text(f" <b>FAILED</b>: {e}")
+            w3.eth.send_raw_transaction(signed.rawTransaction)
+            await update.message.reply_text(" ✅ <b>APPROVED</b>", parse_mode='HTML')
+        except Exception as e: await update.message.reply_text(f" <b>ERR:</b> {e}")
 
 async def handle_query(update, context):
-    q = update.callback_query
-    await q.answer()
-    if q.data == "none": return
-    
-    # Default stake if none set
+    q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 50))
     
     if "SET_" in q.data:
-        val = float(q.data.split("_")[1])
+        val = int(q.data.split("_")[1])
         context.user_data['stake'] = val
-        await q.edit_message_text(f" <b>CAPITAL LOADED: ${val:,.2f}</b>")
+        await q.edit_message_text(f"🚀 <b>CAPITAL: ${abbreviate_amount(val)}</b>", parse_mode='HTML')
     
     elif "ARB_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
-        msg = (f"<b>PLAN:</b> {target['title']}\n <b>Ends:</b> {target['ends']}\n\n YES: ${calc['stake_yes']}\n NO: ${calc['stake_no']}\n ROI: {calc['roi']}%")
+        msg = f"<b>PLAN:</b> {target['title']}\n YES: ${calc['stake_yes']}\n NO: ${calc['stake_no']}\n ROI: {calc['roi']}%"
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(" EXECUTE", callback_data=f"EXE_{q.data.split('_')[1]}")]]), parse_mode='HTML')
     
     elif "EXE_" in q.data:
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         err_msg = ""
-        
         for (t_id, amt) in [(target['yes_id'], calc['stake_yes']), (target['no_id'], calc['stake_no'])]:
             try:
                 order_args = MarketOrderArgs(token_id=str(t_id), amount=float(amt), price=0.99, side=BUY)
-                if not hasattr(order_args, 'size'):
-                    setattr(order_args, 'size', float(amt))
-                created_order = clob_client.create_order(order_args)
-                resp = clob_client.post_order(created_order)
+                if not hasattr(order_args, 'size'): setattr(order_args, 'size', float(amt))
+                resp = clob_client.post_order(clob_client.create_order(order_args))
                 if not (resp.get("success") or resp.get("orderID")):
-                    err_msg = resp.get("errorMsg") or str(resp)
-                    break
-            except Exception as e:
-                err_msg = str(e)
-                break
+                    err_msg = resp.get("errorMsg") or str(resp); break
+            except Exception as e: err_msg = str(e); break
         
-        status = " <b>ARBITRAGE SECURED</b>" if not err_msg else f" <b>EXE ERROR</b>\n<code>{err_msg}</code>"
+        status = " ✅ <b>SECURED</b>" if not err_msg else f" ❌ <b>ERR</b>: {err_msg}"
         await context.bot.send_message(q.message.chat_id, status, parse_mode='HTML')
 
 if __name__ == "__main__":
@@ -240,8 +222,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-    print("Hydra Bot (Flash Loan USD Mode) Active...")
     app.run_polling()
+
 
 
 
